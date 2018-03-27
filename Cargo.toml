@@ -1,0 +1,9 @@
+[package]
+name = "muserial"
+version = "0.1.0"
+authors = ["Fionn Cleary <fionn.cleary@streamunlimited.com>"]
+
+[dependencies]
+libc = "0.2.32"
+epoll = "2.1.0"
+argparse = "0.2.1"
