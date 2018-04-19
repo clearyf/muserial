@@ -70,7 +70,7 @@ impl UartTty {
             // Echo back output, but convert carriage returns
             match self.local_echo {
                 LocalEcho::On => {
-                    convert_char_to_crnl('\r', &buf);
+                    buf = convert_char_to_crnl('\r', &buf);
                     write_to_tty(&buf)?;
                 },
                 LocalEcho::Off => (),
