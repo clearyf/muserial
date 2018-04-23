@@ -72,7 +72,7 @@ impl UartTty {
                 LocalEcho::On => {
                     buf = convert_char_to_crnl('\r', &buf);
                     write_to_tty(&buf)?;
-                },
+                }
                 LocalEcho::Off => (),
             };
             Ok(Action::AllOk)
