@@ -10,14 +10,19 @@ use utility::create_error;
 extern crate libc;
 use libc::*;
 
+const BUFFER_SIZE: usize = 1024;
+
 pub struct UartTty {
     uart_settings: libc::termios,
     tty_settings: libc::termios,
     crnl_tranlation: CRNLTranslation,
     local_echo: LocalEcho,
     uart_dev: fs::File,
+    buffer: [u8; BUFFER_SIZE],
+    spare_buffer: [u8; BUFFER_SIZE * 2],
 }
 
+#[derive(Clone, Copy)]
 pub enum Action {
     AllOk,
     Quit,
@@ -50,18 +55,18 @@ impl UartTty {
             crnl_tranlation: crnl,
             local_echo: local_echo,
             uart_dev: dev,
+            buffer: [0; BUFFER_SIZE],
+            spare_buffer: [0; BUFFER_SIZE * 2],
         })
     }
 
     pub fn copy_tty_to_uart(&mut self) -> Result<Action> {
-        let mut buf = vec![0; 512];
-        {
-            let read_size = stdin().read(&mut buf)?;
-            if read_size == 0 {
-                return create_error("No more data to read, port probably disconnected");
-            }
-            buf.resize(read_size, 0);
+        let read_size = stdin().read(&mut self.buffer)?;
+        if read_size == 0 {
+            return create_error("No more data to read, port probably disconnected");
         }
+        let buf = &self.buffer[0..read_size];
+
         let control_o: u8 = 0x0f;
         if buf.contains(&control_o) {
             Ok(Action::Quit)
@@ -70,8 +75,8 @@ impl UartTty {
             // Echo back output, but convert carriage returns
             match self.local_echo {
                 LocalEcho::On => {
-                    buf = convert_char_to_crnl('\r', &buf);
-                    write_to_tty(&buf)?;
+                    let size = convert_char_to_crnl('\r', &buf, &mut self.spare_buffer);
+                    write_to_tty(&self.spare_buffer[0..size])?;
                 }
                 LocalEcho::Off => (),
             };
@@ -80,19 +85,19 @@ impl UartTty {
     }
 
     pub fn copy_uart_to_tty(&mut self) -> Result<Action> {
-        let mut buf = vec![0; 512];
-        {
-            let read_size = self.uart_dev.read(&mut buf)?;
-            if read_size == 0 {
-                return create_error("No more data to read, port probably disconnected");
-            }
-            buf.resize(read_size, 0);
+        let read_size = self.uart_dev.read(&mut self.buffer)?;
+        if read_size == 0 {
+            return create_error("No more data to read, port probably disconnected");
         }
-        buf = match self.crnl_tranlation {
-            CRNLTranslation::On => convert_char_to_crnl('\n', &buf),
-            CRNLTranslation::Off => buf,
+        let buf = &self.buffer[0..read_size];
+
+        match self.crnl_tranlation {
+            CRNLTranslation::On => {
+                let size = convert_char_to_crnl('\n', &buf, &mut self.spare_buffer);
+                write_to_tty(&self.spare_buffer[0..size])?;
+            }
+            CRNLTranslation::Off => write_to_tty(&buf)?,
         };
-        write_to_tty(&buf)?;
         Ok(Action::AllOk)
     }
 
@@ -164,18 +169,19 @@ fn new_termios() -> libc::termios {
     }
 }
 
-fn convert_char_to_crnl(ch: char, buf: &Vec<u8>) -> Vec<u8> {
-    buf.iter().fold(
-        Vec::new(),
-        |mut vec, &c| if c == (ch as u8) {
-            vec.push('\n' as u8);
-            vec.push('\r' as u8);
-            vec
+fn convert_char_to_crnl(ch: char, buf: &[u8], buf_out: &mut [u8]) -> usize {
+    let mut j = 0;
+    for c in buf.iter() {
+        if *c == (ch as u8) {
+            buf_out[j] = '\n' as u8;
+            j = j + 1;
+            buf_out[j] = '\r' as u8;
         } else {
-            vec.push(c);
-            vec
-        },
-    )
+            buf_out[j] = *c;
+        }
+        j = j + 1;
+    }
+    return j;
 }
 
 fn write_to_tty(buf: &[u8]) -> Result<()> {
