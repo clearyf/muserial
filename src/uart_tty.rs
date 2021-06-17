@@ -15,11 +15,8 @@ const BUFFER_SIZE: usize = 1024;
 pub struct UartTty {
     uart_settings: libc::termios,
     tty_settings: libc::termios,
-    crnl_tranlation: CRNLTranslation,
-    local_echo: LocalEcho,
     uart_dev: fs::File,
     buffer: [u8; BUFFER_SIZE],
-    spare_buffer: [u8; BUFFER_SIZE * 2],
 }
 
 #[derive(Clone, Copy)]
@@ -28,20 +25,8 @@ pub enum Action {
     Quit,
 }
 
-#[derive(Clone, Copy)]
-pub enum LocalEcho {
-    On,
-    Off,
-}
-
-#[derive(Clone, Copy)]
-pub enum CRNLTranslation {
-    On,
-    Off,
-}
-
 impl UartTty {
-    pub fn new(dev_name: &str, local_echo: LocalEcho, crnl: CRNLTranslation) -> Result<UartTty> {
+    pub fn new(dev_name: &str) -> Result<UartTty> {
         let dev = OpenOptions::new().read(true).write(true).open(dev_name)?;
         let tty_settings = get_tty_settings(STDIN_FILENO)?;
         set_tty_settings(STDIN_FILENO, &update_tty_settings(&tty_settings))?;
@@ -52,11 +37,8 @@ impl UartTty {
         Ok(UartTty {
             uart_settings: uart_settings,
             tty_settings: tty_settings,
-            crnl_tranlation: crnl,
-            local_echo: local_echo,
             uart_dev: dev,
             buffer: [0; BUFFER_SIZE],
-            spare_buffer: [0; BUFFER_SIZE * 2],
         })
     }
 
@@ -72,14 +54,6 @@ impl UartTty {
             Ok(Action::Quit)
         } else {
             self.uart_dev.write_all(&buf)?;
-            // Echo back output, but convert carriage returns
-            match self.local_echo {
-                LocalEcho::On => {
-                    let size = convert_char_to_crnl('\r', &buf, &mut self.spare_buffer);
-                    write_to_tty(&self.spare_buffer[0..size])?;
-                }
-                LocalEcho::Off => (),
-            };
             Ok(Action::AllOk)
         }
     }
@@ -90,14 +64,7 @@ impl UartTty {
             return create_error("No more data to read, port probably disconnected");
         }
         let buf = &self.buffer[0..read_size];
-
-        match self.crnl_tranlation {
-            CRNLTranslation::On => {
-                let size = convert_char_to_crnl('\n', &buf, &mut self.spare_buffer);
-                write_to_tty(&self.spare_buffer[0..size])?;
-            }
-            CRNLTranslation::Off => write_to_tty(&buf)?,
-        };
+        write_to_tty(&buf)?;
         Ok(Action::AllOk)
     }
 
@@ -167,21 +134,6 @@ fn new_termios() -> libc::termios {
         c_ispeed: 0,
         c_ospeed: 0,
     }
-}
-
-fn convert_char_to_crnl(ch: char, buf: &[u8], buf_out: &mut [u8]) -> usize {
-    let mut j = 0;
-    for c in buf.iter() {
-        if *c == (ch as u8) {
-            buf_out[j] = '\n' as u8;
-            j = j + 1;
-            buf_out[j] = '\r' as u8;
-        } else {
-            buf_out[j] = *c;
-        }
-        j = j + 1;
-    }
-    return j;
 }
 
 fn write_to_tty(buf: &[u8]) -> Result<()> {
