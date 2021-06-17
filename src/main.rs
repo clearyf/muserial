@@ -16,9 +16,9 @@ use uart_tty::{Action, CRNLTranslation, LocalEcho, UartTty};
 mod utility;
 
 fn main() {
-    let mut dev_name = "".to_string();
     let mut local_echo = LocalEcho::Off;
     let mut crnl = CRNLTranslation::Off;
+    let mut dev_name = "/dev/ttyUSB0".to_string();
     {
         let mut ap = ArgumentParser::new();
         ap.set_description("Connect to a serial line.");
@@ -32,7 +32,7 @@ fn main() {
             StoreConst(CRNLTranslation::On),
             "CR/NL translation enabled",
         );
-        ap.refer(&mut dev_name).required().add_argument(
+        ap.refer(&mut dev_name).add_argument(
             "tty-device",
             Store,
             "Tty device to connect to",
