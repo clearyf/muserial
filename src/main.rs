@@ -14,6 +14,7 @@ mod uart_tty;
 use uart_tty::{Action, UartTty};
 
 mod utility;
+use utility::retry_on_eintr;
 
 fn main() {
     let mut dev_name = "/dev/ttyUSB0".to_string();
@@ -54,19 +55,18 @@ fn mainloop(dev_name: &str) -> Result<()> {
     )?;
     let mut events = Events::with_capacity(2);
     loop {
-        poll.poll(&mut events, None)?;
+        retry_on_eintr(|| {poll.poll(&mut events, None)})?;
 
         for event in &events {
             if event.token() == STDIN_ID {
-                let ret = uart.copy_tty_to_uart()?;
-                match ret {
+                match uart.copy_tty_to_uart()? {
                     Action::AllOk => (),
                     Action::Quit => return Ok(()),
                 }
             } else if event.token() == UART_ID {
                 uart.copy_uart_to_tty()?;
             } else {
-                panic!("Unknown id in poll!");
+                panic!("Unknown id in poll: {:?}", event.token());
             }
         }
     }
