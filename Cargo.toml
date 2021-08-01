@@ -6,4 +6,4 @@ authors = ["Fionn Cleary <fionn.cleary@streamunlimited.com>"]
 [dependencies]
 libc = "0.2.74"
 argparse = "0.2.2"
-mio = { version = "0.7.13", features = ["os-poll", "os-ext"] }
+io-uring = "0.5.1"

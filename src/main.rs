@@ -1,31 +1,28 @@
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
 
 extern crate libc;
 use libc::*;
 
-extern crate mio;
-use mio::{Events, Interest, Poll, Token};
-use mio::unix::SourceFd;
+extern crate io_uring;
+use io_uring::types::Fd;
+use io_uring::{opcode, IoUring, SubmissionQueue};
 
 extern crate argparse;
 use argparse::{ArgumentParser, Store};
 
 mod uart_tty;
-use uart_tty::{Action, UartTty};
+use uart_tty::UartTty;
 
 mod utility;
-use utility::retry_on_eintr;
+use utility::{retry_on_eintr, Action};
 
 fn main() {
     let mut dev_name = "/dev/ttyUSB0".to_string();
     {
         let mut ap = ArgumentParser::new();
         ap.set_description("Connect to a serial line.");
-        ap.refer(&mut dev_name).add_argument(
-            "tty-device",
-            Store,
-            "Tty device to connect to",
-        );
+        ap.refer(&mut dev_name)
+            .add_argument("tty-device", Store, "Tty device to connect to");
         ap.parse_args_or_exit();
     }
     println!("Opening uart: {}", dev_name);
@@ -36,37 +33,34 @@ fn main() {
     }
 }
 
-const STDIN_ID: Token = Token(0);
-const UART_ID: Token = Token(1);
+fn submit_pollin(sq: &mut SubmissionQueue, fd: i32, user_data: u64) -> Result<()> {
+    let entry = opcode::PollAdd::new(Fd(fd), POLLIN as _)
+        .build()
+        .user_data(user_data);
+    unsafe { sq.push(&entry) }
+        .map_err(|e| Error::new(ErrorKind::Other, format!("io-uring push error: {}", e)))
+}
 
 fn mainloop(dev_name: &str) -> Result<()> {
+    let mut ring = IoUring::new(64)?;
+    let (submitter, mut submission, mut completion) = ring.split();
     let mut uart = UartTty::new(dev_name)?;
-    let mut poll = Poll::new()?;
 
-    poll.registry().register(
-        &mut SourceFd(&STDIN_FILENO),
-        STDIN_ID,
-        Interest::READABLE,
-    )?;
-    poll.registry().register(
-        &mut SourceFd(&uart.uart_fd()),
-        UART_ID,
-        Interest::READABLE,
-    )?;
-    let mut events = Events::with_capacity(2);
+    for (fd, id) in uart.init_reads() {
+        submit_pollin(&mut submission, fd, id)?;
+    }
+
     loop {
-        retry_on_eintr(|| {poll.poll(&mut events, None)})?;
+        submission.sync();
+        retry_on_eintr(|| submitter.submit_and_wait(1))?;
 
-        for event in &events {
-            if event.token() == STDIN_ID {
-                match uart.copy_tty_to_uart()? {
-                    Action::AllOk => (),
-                    Action::Quit => return Ok(()),
+        completion.sync();
+        for cqe in &mut completion {
+            match uart.handle_read(cqe.result(), cqe.user_data())? {
+                Action::NextRead(fd, id) => {
+                    submit_pollin(&mut submission, fd, id)?;
                 }
-            } else if event.token() == UART_ID {
-                uart.copy_uart_to_tty()?;
-            } else {
-                panic!("Unknown id in poll: {:?}", event.token());
+                Action::Quit => return Ok(()),
             }
         }
     }

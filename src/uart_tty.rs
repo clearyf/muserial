@@ -1,28 +1,24 @@
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::{stdin, Result};
-use std::os::unix::io::{RawFd, AsRawFd, IntoRawFd, FromRawFd};
 use std::io::prelude::{Read, Write};
+use std::io::{stdin, Result};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
-use utility::create_error;
+use utility::{create_error, Action};
 
 extern crate libc;
 use libc::*;
 
 const BUFFER_SIZE: usize = 1024;
+const STDIN_READ: u64 = 1;
+const UART_READ: u64 = 2;
 
 pub struct UartTty {
     uart_settings: libc::termios,
     tty_settings: libc::termios,
     uart_dev: fs::File,
     buffer: [u8; BUFFER_SIZE],
-}
-
-#[derive(Clone, Copy)]
-pub enum Action {
-    AllOk,
-    Quit,
 }
 
 impl UartTty {
@@ -42,7 +38,24 @@ impl UartTty {
         })
     }
 
-    pub fn copy_tty_to_uart(&mut self) -> Result<Action> {
+    pub fn init_reads(&self) -> Vec<(i32, u64)> {
+        vec![(STDIN_FILENO, STDIN_READ), (self.uart_fd(), UART_READ)]
+    }
+
+    pub fn handle_read(&mut self, result: i32, id: u64) -> Result<Action> {
+        if result != 1 {
+            return create_error(&format!("Got unexpected result from poll: {}", result));
+        }
+        if id == STDIN_READ {
+            self.copy_tty_to_uart()
+        } else if id == UART_READ {
+            self.copy_uart_to_tty()
+        } else {
+            create_error(&format!("Got unknown id from poll: {}", id))
+        }
+    }
+
+    fn copy_tty_to_uart(&mut self) -> Result<Action> {
         let read_size = stdin().read(&mut self.buffer)?;
         if read_size == 0 {
             return create_error("No more data to read, port probably disconnected");
@@ -54,21 +67,21 @@ impl UartTty {
             Ok(Action::Quit)
         } else {
             self.uart_dev.write_all(&buf)?;
-            Ok(Action::AllOk)
+            Ok(Action::NextRead(STDIN_FILENO, STDIN_READ))
         }
     }
 
-    pub fn copy_uart_to_tty(&mut self) -> Result<Action> {
+    fn copy_uart_to_tty(&mut self) -> Result<Action> {
         let read_size = self.uart_dev.read(&mut self.buffer)?;
         if read_size == 0 {
             return create_error("No more data to read, port probably disconnected");
         }
         let buf = &self.buffer[0..read_size];
         write_to_tty(&buf)?;
-        Ok(Action::AllOk)
+        Ok(Action::NextRead(self.uart_fd(), UART_READ))
     }
 
-    pub fn uart_fd(&self) -> RawFd {
+    fn uart_fd(&self) -> RawFd {
         self.uart_dev.as_raw_fd()
     }
 }
