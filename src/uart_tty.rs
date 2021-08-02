@@ -56,8 +56,8 @@ impl UartTty {
 
     pub fn init_actions(&self) -> Vec<Action> {
         vec![
-            Action::Read(STDIN_FILENO, DEFAULT_READ_SIZE, STDIN_READ),
-            Action::Read(self.uart_fd(), DEFAULT_READ_SIZE, UART_READ),
+            Action::Read(STDIN_FILENO, vec![0; DEFAULT_READ_SIZE], STDIN_READ),
+            Action::Read(self.uart_fd(), vec![0; DEFAULT_READ_SIZE], UART_READ),
         ]
     }
 
@@ -107,18 +107,19 @@ impl UartTty {
         }
     }
 
-    fn copy_tty_to_uart(&mut self, buf: Vec<u8>) -> Result<Action> {
+    fn copy_tty_to_uart(&mut self, mut buf: Vec<u8>) -> Result<Action> {
         let control_o: u8 = 0x0f;
         if buf.contains(&control_o) {
             self.tear_down_in_progress = true;
             Ok(Action::Cancel(UART_READ, UART_READ_CANCEL))
         } else {
             self.uart_dev.write_all(&buf)?;
-            Ok(Action::Read(STDIN_FILENO, DEFAULT_READ_SIZE, STDIN_READ))
+            buf.resize(DEFAULT_READ_SIZE, 0);
+            Ok(Action::Read(STDIN_FILENO, buf, STDIN_READ))
         }
     }
 
-    fn copy_uart_to_tty(&mut self, buf: Vec<u8>) -> Result<Action> {
+    fn copy_uart_to_tty(&mut self, mut buf: Vec<u8>) -> Result<Action> {
         if buf.len() == 0 {
             self.tear_down_in_progress = true;
             return Ok(Action::Cancel(STDIN_READ, STDIN_READ_CANCEL))
@@ -127,7 +128,8 @@ impl UartTty {
         if let Some((logfile, _)) = &mut self.logfile {
             logfile.write_all(&buf)?;
         }
-        Ok(Action::Read(self.uart_fd(), DEFAULT_READ_SIZE, UART_READ))
+        buf.resize(DEFAULT_READ_SIZE, 0);
+        Ok(Action::Read(self.uart_fd(), buf, UART_READ))
     }
 
     fn uart_fd(&self) -> RawFd {

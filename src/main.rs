@@ -75,19 +75,17 @@ fn handle_action(
         Action::Cancel(op_to_cancel, user_data) => {
             submit_cancel(submission, op_to_cancel, user_data)?;
         }
-        Action::Read(fd, size, user_data) => {
-            if let Some(_old_value) = buffers.insert(user_data, vec![0; size]) {
-                panic!("user_data {} already WIP!", user_data);
+        Action::Read(fd, mut buf, user_data) => {
+            submit_read(submission, fd, &mut buf, user_data)?;
+            if let Some(_old_buf) = buffers.insert(user_data, buf) {
+                panic!("user_data {} already registered!", user_data);
             }
-            let buf = buffers.get_mut(&user_data).unwrap();
-            submit_read(submission, fd, buf, user_data)?;
         }
-        Action::Write(fd, buf, user_data) => {
-            if let Some(_old_value) = buffers.insert(user_data, buf) {
-                panic!("user_data {} already WIP!", user_data);
+        Action::Write(fd, mut buf, user_data) => {
+            submit_write(submission, fd, &mut buf, user_data)?;
+            if let Some(_old_buf) = buffers.insert(user_data, buf) {
+                panic!("user_data {} already registered!", user_data);
             }
-            let buf = buffers.get_mut(&user_data).unwrap();
-            submit_write(submission, fd, buf, user_data)?;
         }
     }
     Ok(1)
