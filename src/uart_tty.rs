@@ -2,6 +2,7 @@ use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::prelude::{Read, Write};
+use std::io::BufWriter;
 use std::io::{stdin, Result};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
@@ -17,7 +18,7 @@ pub struct UartTty {
     uart_settings: libc::termios,
     tty_settings: libc::termios,
     uart_dev: File,
-    logfile: Option<File>,
+    logfile: Option<BufWriter<File>>,
     buffer: [u8; BUFFER_SIZE],
 }
 
@@ -82,12 +83,9 @@ impl UartTty {
         }
         let buf = &self.buffer[0..read_size];
         write_to_tty(&buf)?;
-        match &mut self.logfile {
-            Some(logfile) => {
-                logfile.write_all(buf)?;
-            }
-            None => {}
-        };
+        if let Some(logfile) = &mut self.logfile {
+            logfile.write_all(buf)?;
+        }
         Ok(Action::Read(self.uart_fd(), UART_READ))
     }
 
@@ -98,14 +96,17 @@ impl UartTty {
 
 impl Drop for UartTty {
     fn drop(&mut self) {
-        match set_tty_settings(STDIN_FILENO, &self.tty_settings) {
-            Err(e) => println!("Couldn't restore tty settings: {}", e),
-            _ => (),
-        };
-        match set_tty_settings(self.uart_dev.as_raw_fd(), &self.uart_settings) {
-            Err(e) => println!("Couldn't restore uart settings: {}", e),
-            _ => (),
-        };
+        if let Err(e) = set_tty_settings(STDIN_FILENO, &self.tty_settings) {
+            println!("Couldn't restore tty settings: {}", e);
+        }
+        if let Err(e) = set_tty_settings(self.uart_dev.as_raw_fd(), &self.uart_settings) {
+            println!("Couldn't restore uart settings: {}", e);
+        }
+        if let Some(logfile) = &mut self.logfile {
+            if let Err(e) = logfile.flush() {
+                println!("Error while flushing logfile: {}", e);
+            }
+        }
     }
 }
 
@@ -180,7 +181,7 @@ fn get_logfile_name() -> Result<String> {
     ))
 }
 
-fn get_logfile() -> Option<File> {
+fn get_logfile() -> Option<BufWriter<File>> {
     let logfile_name = match get_logfile_name() {
         Ok(x) => x,
         Err(e) => {
@@ -196,5 +197,5 @@ fn get_logfile() -> Option<File> {
         }
     };
     println!("Created new logfile: {}", &logfile_name);
-    Some(logfile)
+    Some(BufWriter::new(logfile))
 }
