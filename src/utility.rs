@@ -3,6 +3,7 @@ use std::io::{Error, ErrorKind, Result};
 #[derive(Clone, Copy)]
 pub enum Action {
     PollIn(i32, u64),
+    Read(i32, usize, u64),
     Quit,
 }
 

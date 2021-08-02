@@ -2,7 +2,7 @@ use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::prelude::{Read, Write};
-use std::io::{stdin, BufWriter, Error, ErrorKind, Result};
+use std::io::{BufWriter, Error, ErrorKind, Result};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::process::Command;
 
@@ -10,6 +10,7 @@ use utility::{create_error, Action};
 
 use libc::*;
 
+const DEFAULT_READ_SIZE: usize = 1024;
 const BUFFER_SIZE: usize = 1024;
 const STDIN_READ: u64 = 1;
 const UART_READ: u64 = 2;
@@ -19,7 +20,7 @@ pub struct UartTty {
     tty_settings: libc::termios,
     uart_dev: File,
     logfile: Option<(BufWriter<File>, String)>,
-    buffer: [u8; BUFFER_SIZE],
+    uart_buffer: [u8; BUFFER_SIZE],
 }
 
 impl UartTty {
@@ -46,49 +47,67 @@ impl UartTty {
             tty_settings: tty_settings,
             uart_dev: dev,
             logfile: logfile,
-            buffer: [0; BUFFER_SIZE],
+            uart_buffer: [0; BUFFER_SIZE],
         })
     }
 
-    pub fn init_reads(&self) -> Vec<(i32, u64)> {
-        vec![(STDIN_FILENO, STDIN_READ), (self.uart_fd(), UART_READ)]
+    pub fn init_actions(&self) -> Vec<Action> {
+        vec![
+            Action::Read(STDIN_FILENO, DEFAULT_READ_SIZE, STDIN_READ),
+            Action::PollIn(self.uart_fd(), UART_READ),
+        ]
     }
 
-    pub fn handle_read(&mut self, result: i32, user_data: u64) -> Result<Action> {
+    pub fn handle_poll(&mut self, result: i32, user_data: u64) -> Result<Action> {
         if result != 1 {
             return create_error(&format!("Got unexpected result from poll: {}", result));
         }
-        if user_data == STDIN_READ {
-            self.copy_tty_to_uart()
-        } else if user_data == UART_READ {
+        if user_data == UART_READ {
             self.copy_uart_to_tty()
         } else {
             create_error(&format!("Got unknown user_data from poll: {}", user_data))
         }
     }
 
-    fn copy_tty_to_uart(&mut self) -> Result<Action> {
-        let read_size = stdin().read(&mut self.buffer)?;
-        if read_size == 0 {
-            return create_error("No more date_string to read, port probably disconnected");
+    pub fn handle_buffer(
+        &mut self,
+        result: i32,
+        mut buf: Vec<u8>,
+        user_data: u64,
+    ) -> Result<Action> {
+        if result <= 0 {
+            // return create_error(&format!(
+            //     "Got unexpected result in handle_buffer: {}",
+            //     result
+            // ));
+            buf.clear();
         }
-        let buf = &self.buffer[0..read_size];
+        else {
+            buf.resize(result as usize, 0);
+        }
+        if user_data == STDIN_READ {
+            self.copy_tty_to_uart(buf)
+        } else {
+            create_error(&format!("Got unknown user_data from poll: {}", user_data))
+        }
+    }
 
+    fn copy_tty_to_uart(&mut self, buf: Vec<u8>) -> Result<Action> {
         let control_o: u8 = 0x0f;
         if buf.contains(&control_o) {
             Ok(Action::Quit)
         } else {
             self.uart_dev.write_all(&buf)?;
-            Ok(Action::PollIn(STDIN_FILENO, STDIN_READ))
+            Ok(Action::Read(STDIN_FILENO, DEFAULT_READ_SIZE, STDIN_READ))
         }
     }
 
     fn copy_uart_to_tty(&mut self) -> Result<Action> {
-        let read_size = self.uart_dev.read(&mut self.buffer)?;
+        let read_size = self.uart_dev.read(&mut self.uart_buffer)?;
         if read_size == 0 {
             return create_error("No more date_string to read, port probably disconnected");
         }
-        let buf = &self.buffer[0..read_size];
+        let buf = &self.uart_buffer[0..read_size];
         write_to_tty(&buf)?;
         if let Some((logfile, _)) = &mut self.logfile {
             logfile.write_all(buf)?;
