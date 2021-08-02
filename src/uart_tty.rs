@@ -79,7 +79,7 @@ impl UartTty {
             Ok(Action::Quit)
         } else {
             self.uart_dev.write_all(&buf)?;
-            Ok(Action::Read(STDIN_FILENO, STDIN_READ))
+            Ok(Action::PollIn(STDIN_FILENO, STDIN_READ))
         }
     }
 
@@ -93,7 +93,7 @@ impl UartTty {
         if let Some((logfile, _)) = &mut self.logfile {
             logfile.write_all(buf)?;
         }
-        Ok(Action::Read(self.uart_fd(), UART_READ))
+        Ok(Action::PollIn(self.uart_fd(), UART_READ))
     }
 
     fn uart_fd(&self) -> RawFd {

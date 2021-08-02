@@ -49,7 +49,7 @@ fn mainloop(dev_name: &str) -> Result<()> {
         completion.sync();
         for cqe in &mut completion {
             match uart.handle_read(cqe.result(), cqe.user_data())? {
-                Action::Read(fd, user_data) => {
+                Action::PollIn(fd, user_data) => {
                     submit_pollin(&mut submission, fd, user_data)?;
                 }
                 Action::Quit => return Ok(()),

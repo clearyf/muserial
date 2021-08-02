@@ -2,7 +2,7 @@ use std::io::{Error, ErrorKind, Result};
 
 #[derive(Clone, Copy)]
 pub enum Action {
-    Read(i32, u64),
+    PollIn(i32, u64),
     Quit,
 }
 
