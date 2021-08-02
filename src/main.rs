@@ -10,6 +10,8 @@ use io_uring::{opcode, IoUring, SubmissionQueue};
 extern crate argparse;
 use argparse::{ArgumentParser, Store};
 
+extern crate chrono;
+
 mod uart_tty;
 use uart_tty::UartTty;
 

@@ -1,4 +1,4 @@
-use std::fs;
+use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::prelude::{Read, Write};
@@ -17,12 +17,16 @@ const UART_READ: u64 = 2;
 pub struct UartTty {
     uart_settings: libc::termios,
     tty_settings: libc::termios,
-    uart_dev: fs::File,
+    uart_dev: File,
+    logfile: Option<File>,
     buffer: [u8; BUFFER_SIZE],
 }
 
 impl UartTty {
     pub fn new(dev_name: &str) -> Result<UartTty> {
+        // get_logfile() prints the logfile name to the terminal; do
+        // that before upsetting the default tty mode
+        let logfile = get_logfile();
         let dev = OpenOptions::new().read(true).write(true).open(dev_name)?;
         let tty_settings = get_tty_settings(STDIN_FILENO)?;
         set_tty_settings(STDIN_FILENO, &update_tty_settings(&tty_settings))?;
@@ -34,6 +38,7 @@ impl UartTty {
             uart_settings: uart_settings,
             tty_settings: tty_settings,
             uart_dev: dev,
+            logfile: logfile,
             buffer: [0; BUFFER_SIZE],
         })
     }
@@ -78,6 +83,12 @@ impl UartTty {
         }
         let buf = &self.buffer[0..read_size];
         write_to_tty(&buf)?;
+        match &mut self.logfile {
+            Some(logfile) => {
+                logfile.write_all(buf)?;
+            },
+            None => {},
+        };
         Ok(Action::NextRead(self.uart_fd(), UART_READ))
     }
 
@@ -156,4 +167,32 @@ fn write_to_tty(buf: &[u8]) -> Result<()> {
     // otherwise std::fs::File closes the fd.
     stdout.into_raw_fd();
     Ok(())
+}
+
+fn get_logfile_name() -> Result<String> {
+    let home_dir = match env::var("HOME") {
+        Ok(x) => x,
+        _ => return create_error("Couldn't retrieve $HOME"),
+    };
+    let date_string = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    Ok(format!("{}/Documents/lima-logs/log-{}", home_dir, date_string))
+}
+
+fn get_logfile() -> Option<File> {
+    let logfile_name = match get_logfile_name() {
+        Ok(x) => x,
+        Err(e) => {
+            println!("Couldn't get logfile name, not opening logfile: {}", e);
+            return None;
+        }
+    };
+    let logfile = match File::create(&logfile_name) {
+        Ok(x) => x,
+        Err(e) => {
+            println!("Couldn't open logfile at {}, error: {}", &logfile_name, e);
+            return None;
+        }
+    };
+    println!("Created new logfile: {}", &logfile_name);
+    Some(logfile)
 }

@@ -7,3 +7,4 @@ authors = ["Fionn Cleary <fionn.cleary@streamunlimited.com>"]
 libc = "0.2.74"
 argparse = "0.2.2"
 io-uring = "0.5.1"
+chrono = "0.4"
