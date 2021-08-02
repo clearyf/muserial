@@ -4,6 +4,7 @@ use std::fs::OpenOptions;
 use std::io::prelude::{Read, Write};
 use std::io::{stdin, BufWriter, Error, ErrorKind, Result};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::process::Command;
 
 use utility::{create_error, Action};
 
@@ -17,7 +18,7 @@ pub struct UartTty {
     uart_settings: libc::termios,
     tty_settings: libc::termios,
     uart_dev: File,
-    logfile: Option<BufWriter<File>>,
+    logfile: Option<(BufWriter<File>, String)>,
     buffer: [u8; BUFFER_SIZE],
 }
 
@@ -26,7 +27,7 @@ impl UartTty {
         let logfile = match get_logfile() {
             Ok((logfile, path)) => {
                 println!("Created new logfile: {}", &path);
-                Some(logfile)
+                Some((logfile, path))
             }
             Err(e) => {
                 println!("Couldn't open logfile: {}", e);
@@ -89,7 +90,7 @@ impl UartTty {
         }
         let buf = &self.buffer[0..read_size];
         write_to_tty(&buf)?;
-        if let Some(logfile) = &mut self.logfile {
+        if let Some((logfile, _)) = &mut self.logfile {
             logfile.write_all(buf)?;
         }
         Ok(Action::Read(self.uart_fd(), UART_READ))
@@ -108,9 +109,24 @@ impl Drop for UartTty {
         if let Err(e) = set_tty_settings(self.uart_dev.as_raw_fd(), &self.uart_settings) {
             println!("Couldn't restore uart settings: {}", e);
         }
-        if let Some(logfile) = &mut self.logfile {
+        if let Some((logfile, path)) = &mut self.logfile {
             if let Err(e) = logfile.flush() {
                 println!("Error while flushing logfile: {}", e);
+            }
+            // Steal the path and then close the file
+            let path = std::mem::take(path);
+            self.logfile = None;
+
+            // Compress logfile now that the file is closed
+            match Command::new("xz").arg(path).output() {
+                Ok(output) => {
+                    if !output.status.success() {
+                        println!("xz failed: {:?}", output);
+                    }
+                }
+                Err(e) => {
+                    println!("xz failed to start: {}", e);
+                }
             }
         }
     }
