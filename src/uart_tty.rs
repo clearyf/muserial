@@ -7,7 +7,6 @@ use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 use utility::{create_error, Action};
 
-extern crate libc;
 use libc::*;
 
 const BUFFER_SIZE: usize = 1024;
@@ -47,23 +46,23 @@ impl UartTty {
         vec![(STDIN_FILENO, STDIN_READ), (self.uart_fd(), UART_READ)]
     }
 
-    pub fn handle_read(&mut self, result: i32, id: u64) -> Result<Action> {
+    pub fn handle_read(&mut self, result: i32, user_data: u64) -> Result<Action> {
         if result != 1 {
             return create_error(&format!("Got unexpected result from poll: {}", result));
         }
-        if id == STDIN_READ {
+        if user_data == STDIN_READ {
             self.copy_tty_to_uart()
-        } else if id == UART_READ {
+        } else if user_data == UART_READ {
             self.copy_uart_to_tty()
         } else {
-            create_error(&format!("Got unknown id from poll: {}", id))
+            create_error(&format!("Got unknown user_data from poll: {}", user_data))
         }
     }
 
     fn copy_tty_to_uart(&mut self) -> Result<Action> {
         let read_size = stdin().read(&mut self.buffer)?;
         if read_size == 0 {
-            return create_error("No more data to read, port probably disconnected");
+            return create_error("No more date_string to read, port probably disconnected");
         }
         let buf = &self.buffer[0..read_size];
 
@@ -72,24 +71,24 @@ impl UartTty {
             Ok(Action::Quit)
         } else {
             self.uart_dev.write_all(&buf)?;
-            Ok(Action::NextRead(STDIN_FILENO, STDIN_READ))
+            Ok(Action::Read(STDIN_FILENO, STDIN_READ))
         }
     }
 
     fn copy_uart_to_tty(&mut self) -> Result<Action> {
         let read_size = self.uart_dev.read(&mut self.buffer)?;
         if read_size == 0 {
-            return create_error("No more data to read, port probably disconnected");
+            return create_error("No more date_string to read, port probably disconnected");
         }
         let buf = &self.buffer[0..read_size];
         write_to_tty(&buf)?;
         match &mut self.logfile {
             Some(logfile) => {
                 logfile.write_all(buf)?;
-            },
-            None => {},
+            }
+            None => {}
         };
-        Ok(Action::NextRead(self.uart_fd(), UART_READ))
+        Ok(Action::Read(self.uart_fd(), UART_READ))
     }
 
     fn uart_fd(&self) -> RawFd {
@@ -175,7 +174,10 @@ fn get_logfile_name() -> Result<String> {
         _ => return create_error("Couldn't retrieve $HOME"),
     };
     let date_string = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-    Ok(format!("{}/Documents/lima-logs/log-{}", home_dir, date_string))
+    Ok(format!(
+        "{}/Documents/lima-logs/log-{}",
+        home_dir, date_string
+    ))
 }
 
 fn get_logfile() -> Option<File> {

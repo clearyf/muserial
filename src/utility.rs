@@ -2,7 +2,7 @@ use std::io::{Error, ErrorKind, Result};
 
 #[derive(Clone, Copy)]
 pub enum Action {
-    NextRead(i32, u64),
+    Read(i32, u64),
     Quit,
 }
 
@@ -17,7 +17,7 @@ where
     loop {
         match fun() {
             Err(e) => {
-                if e.kind() != std::io::ErrorKind::Interrupted {
+                if e.kind() != ErrorKind::Interrupted {
                     return Err(e);
                 }
             }

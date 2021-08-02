@@ -44,23 +44,21 @@ fn submit_pollin(sq: &mut SubmissionQueue, fd: i32, user_data: u64) -> Result<()
 }
 
 fn mainloop(dev_name: &str) -> Result<()> {
-    let mut ring = IoUring::new(64)?;
+    let mut ring = IoUring::new(4)?;
     let (submitter, mut submission, mut completion) = ring.split();
     let mut uart = UartTty::new(dev_name)?;
 
-    for (fd, id) in uart.init_reads() {
-        submit_pollin(&mut submission, fd, id)?;
+    for (fd, user_data) in uart.init_reads() {
+        submit_pollin(&mut submission, fd, user_data)?;
     }
-
     loop {
         submission.sync();
         retry_on_eintr(|| submitter.submit_and_wait(1))?;
-
         completion.sync();
         for cqe in &mut completion {
             match uart.handle_read(cqe.result(), cqe.user_data())? {
-                Action::NextRead(fd, id) => {
-                    submit_pollin(&mut submission, fd, id)?;
+                Action::Read(fd, user_data) => {
+                    submit_pollin(&mut submission, fd, user_data)?;
                 }
                 Action::Quit => return Ok(()),
             }
