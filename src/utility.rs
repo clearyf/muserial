@@ -1,10 +1,10 @@
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Clone, Copy)]
 pub enum Action {
-    PollIn(i32, u64),
     Read(i32, usize, u64),
-    Quit,
+    Write(i32, Vec<u8>, u64),
+    Cancel(u64, u64),
+    NoOp,
 }
 
 pub fn create_error<T>(str: &str) -> Result<T> {

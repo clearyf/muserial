@@ -3,7 +3,6 @@ use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};
 
 extern crate libc;
-use libc::*;
 
 extern crate io_uring;
 use io_uring::types::Fd;
@@ -32,14 +31,9 @@ fn main() {
     println!("Opening uart: {}", dev_name);
 
     match mainloop(&dev_name) {
-        Ok(()) => println!("\nExiting on request"),
+        Ok(()) => println!("\nExiting"),
         Err(why) => println!("\nError: {}", why),
     }
-}
-
-enum Todo {
-    Nothing,
-    Quit,
 }
 
 fn mainloop(dev_name: &str) -> Result<()> {
@@ -47,55 +41,56 @@ fn mainloop(dev_name: &str) -> Result<()> {
     let mut buffers: HashMap<u64, Vec<u8>> = HashMap::new();
     let (submitter, mut submission, mut completion) = ring.split();
     let mut uart = UartTty::new(dev_name)?;
+    let mut num_in_flight = 0;
 
     for action in uart.init_actions() {
-        handle_action(&mut submission, &mut buffers, &action)?;
+        num_in_flight += handle_action(&mut submission, &mut buffers, action)?;
     }
-    loop {
+    while num_in_flight > 0 {
         submission.sync();
         retry_on_eintr(|| submitter.submit_and_wait(1))?;
         completion.sync();
         for cqe in &mut completion {
+            num_in_flight -= 1;
             let action = if let Some(buffer) = buffers.remove(&cqe.user_data()) {
                 uart.handle_buffer(cqe.result(), buffer, cqe.user_data())?
             } else {
                 uart.handle_poll(cqe.result(), cqe.user_data())?
             };
-            if let Todo::Quit = handle_action(&mut submission, &mut buffers, &action)? {
-                return Ok(());
-            }
+            num_in_flight += handle_action(&mut submission, &mut buffers, action)?;
         }
     }
+    Ok(())
 }
 
 fn handle_action(
     submission: &mut SubmissionQueue,
     buffers: &mut HashMap<u64, Vec<u8>>,
-    action: &Action,
-) -> Result<Todo> {
+    action: Action,
+) -> Result<usize> {
     match action {
-        Action::PollIn(fd, user_data) => {
-            submit_pollin(submission, *fd, *user_data)?;
+        Action::NoOp => {
+            return Ok(0);
+        }
+        Action::Cancel(op_to_cancel, user_data) => {
+            submit_cancel(submission, op_to_cancel, user_data)?;
         }
         Action::Read(fd, size, user_data) => {
-            if let Some(_old_value) = buffers.insert(*user_data, vec![0; *size]) {
+            if let Some(_old_value) = buffers.insert(user_data, vec![0; size]) {
                 panic!("user_data {} already WIP!", user_data);
             }
             let buf = buffers.get_mut(&user_data).unwrap();
-            submit_read(submission, *fd, buf, *user_data)?;
+            submit_read(submission, fd, buf, user_data)?;
         }
-        Action::Quit => return Ok(Todo::Quit),
+        Action::Write(fd, buf, user_data) => {
+            if let Some(_old_value) = buffers.insert(user_data, buf) {
+                panic!("user_data {} already WIP!", user_data);
+            }
+            let buf = buffers.get_mut(&user_data).unwrap();
+            submit_write(submission, fd, buf, user_data)?;
+        }
     }
-    Ok(Todo::Nothing)
-}
-
-fn submit_pollin(sq: &mut SubmissionQueue, fd: i32, user_data: u64) -> Result<()> {
-    let entry = opcode::PollAdd::new(Fd(fd), POLLIN as _)
-        .build()
-        .flags(io_uring::squeue::Flags::ASYNC)
-        .user_data(user_data);
-    unsafe { sq.push(&entry) }
-        .map_err(|e| Error::new(ErrorKind::Other, format!("io-uring push error: {}", e)))
+    Ok(1)
 }
 
 fn submit_read(sq: &mut SubmissionQueue, fd: i32, buf: &mut [u8], user_data: u64) -> Result<()> {
@@ -103,6 +98,25 @@ fn submit_read(sq: &mut SubmissionQueue, fd: i32, buf: &mut [u8], user_data: u64
         .build()
         .flags(io_uring::squeue::Flags::ASYNC)
         .user_data(user_data);
+    unsafe { sq.push(&entry) }
+        .map_err(|e| Error::new(ErrorKind::Other, format!("io-uring push error: {}", e)))
+}
+
+fn submit_write(sq: &mut SubmissionQueue, fd: i32, buf: &mut [u8], user_data: u64) -> Result<()> {
+    let entry = opcode::Write::new(Fd(fd), buf.as_mut_ptr(), buf.len().try_into().unwrap())
+        .build()
+        .flags(io_uring::squeue::Flags::ASYNC)
+        .user_data(user_data);
+    unsafe { sq.push(&entry) }
+        .map_err(|e| Error::new(ErrorKind::Other, format!("io-uring push error: {}", e)))
+}
+
+fn submit_cancel(sq: &mut SubmissionQueue, op_to_cancel: u64, user_data: u64) -> Result<()> {
+    let entry = opcode::AsyncCancel::new(op_to_cancel)
+        .build()
+        .flags(io_uring::squeue::Flags::ASYNC)
+        .user_data(user_data)
+        ;
     unsafe { sq.push(&entry) }
         .map_err(|e| Error::new(ErrorKind::Other, format!("io-uring push error: {}", e)))
 }

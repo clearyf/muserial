@@ -1,7 +1,7 @@
 use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::prelude::{Read, Write};
+use std::io::prelude::Write;
 use std::io::{BufWriter, Error, ErrorKind, Result};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::process::Command;
@@ -11,16 +11,19 @@ use utility::{create_error, Action};
 use libc::*;
 
 const DEFAULT_READ_SIZE: usize = 1024;
-const BUFFER_SIZE: usize = 1024;
 const STDIN_READ: u64 = 1;
 const UART_READ: u64 = 2;
+const UART_READ_CANCEL: u64 = 3;
+const STDIN_READ_CANCEL: u64 = 3;
 
 pub struct UartTty {
     uart_settings: libc::termios,
     tty_settings: libc::termios,
     uart_dev: File,
     logfile: Option<(BufWriter<File>, String)>,
-    uart_buffer: [u8; BUFFER_SIZE],
+    // When quit is requested by the user set this; in progress
+    // operations should be cancelled.
+    tear_down_in_progress: bool,
 }
 
 impl UartTty {
@@ -47,24 +50,30 @@ impl UartTty {
             tty_settings: tty_settings,
             uart_dev: dev,
             logfile: logfile,
-            uart_buffer: [0; BUFFER_SIZE],
+            tear_down_in_progress: false,
         })
     }
 
     pub fn init_actions(&self) -> Vec<Action> {
         vec![
             Action::Read(STDIN_FILENO, DEFAULT_READ_SIZE, STDIN_READ),
-            Action::PollIn(self.uart_fd(), UART_READ),
+            Action::Read(self.uart_fd(), DEFAULT_READ_SIZE, UART_READ),
         ]
     }
 
     pub fn handle_poll(&mut self, result: i32, user_data: u64) -> Result<Action> {
+        if self.tear_down_in_progress {
+            // do nothing
+            return Ok(Action::NoOp);
+        }
         if result != 1 {
             return create_error(&format!("Got unexpected result from poll: {}", result));
         }
-        if user_data == UART_READ {
-            self.copy_uart_to_tty()
-        } else {
+        if user_data == UART_READ_CANCEL {
+            self.tear_down_in_progress = true;
+            Ok(Action::NoOp)
+        }
+        else {
             create_error(&format!("Got unknown user_data from poll: {}", user_data))
         }
     }
@@ -75,6 +84,10 @@ impl UartTty {
         mut buf: Vec<u8>,
         user_data: u64,
     ) -> Result<Action> {
+        if self.tear_down_in_progress {
+            // do nothing
+            return Ok(Action::NoOp);
+        }
         if result <= 0 {
             // return create_error(&format!(
             //     "Got unexpected result in handle_buffer: {}",
@@ -85,7 +98,9 @@ impl UartTty {
         else {
             buf.resize(result as usize, 0);
         }
-        if user_data == STDIN_READ {
+        if user_data == UART_READ {
+            self.copy_uart_to_tty(buf) }
+        else if user_data == STDIN_READ {
             self.copy_tty_to_uart(buf)
         } else {
             create_error(&format!("Got unknown user_data from poll: {}", user_data))
@@ -95,24 +110,24 @@ impl UartTty {
     fn copy_tty_to_uart(&mut self, buf: Vec<u8>) -> Result<Action> {
         let control_o: u8 = 0x0f;
         if buf.contains(&control_o) {
-            Ok(Action::Quit)
+            self.tear_down_in_progress = true;
+            Ok(Action::Cancel(UART_READ, UART_READ_CANCEL))
         } else {
             self.uart_dev.write_all(&buf)?;
             Ok(Action::Read(STDIN_FILENO, DEFAULT_READ_SIZE, STDIN_READ))
         }
     }
 
-    fn copy_uart_to_tty(&mut self) -> Result<Action> {
-        let read_size = self.uart_dev.read(&mut self.uart_buffer)?;
-        if read_size == 0 {
-            return create_error("No more date_string to read, port probably disconnected");
+    fn copy_uart_to_tty(&mut self, buf: Vec<u8>) -> Result<Action> {
+        if buf.len() == 0 {
+            self.tear_down_in_progress = true;
+            return Ok(Action::Cancel(STDIN_READ, STDIN_READ_CANCEL))
         }
-        let buf = &self.uart_buffer[0..read_size];
         write_to_tty(&buf)?;
         if let Some((logfile, _)) = &mut self.logfile {
-            logfile.write_all(buf)?;
+            logfile.write_all(&buf)?;
         }
-        Ok(Action::PollIn(self.uart_fd(), UART_READ))
+        Ok(Action::Read(self.uart_fd(), DEFAULT_READ_SIZE, UART_READ))
     }
 
     fn uart_fd(&self) -> RawFd {
