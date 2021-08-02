@@ -35,14 +35,6 @@ fn main() {
     }
 }
 
-fn submit_pollin(sq: &mut SubmissionQueue, fd: i32, user_data: u64) -> Result<()> {
-    let entry = opcode::PollAdd::new(Fd(fd), POLLIN as _)
-        .build()
-        .user_data(user_data);
-    unsafe { sq.push(&entry) }
-        .map_err(|e| Error::new(ErrorKind::Other, format!("io-uring push error: {}", e)))
-}
-
 fn mainloop(dev_name: &str) -> Result<()> {
     let mut ring = IoUring::new(4)?;
     let (submitter, mut submission, mut completion) = ring.split();
@@ -64,4 +56,12 @@ fn mainloop(dev_name: &str) -> Result<()> {
             }
         }
     }
+}
+
+fn submit_pollin(sq: &mut SubmissionQueue, fd: i32, user_data: u64) -> Result<()> {
+    let entry = opcode::PollAdd::new(Fd(fd), POLLIN as _)
+        .build()
+        .user_data(user_data);
+    unsafe { sq.push(&entry) }
+        .map_err(|e| Error::new(ErrorKind::Other, format!("io-uring push error: {}", e)))
 }

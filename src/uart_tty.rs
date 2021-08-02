@@ -2,8 +2,7 @@ use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::prelude::{Read, Write};
-use std::io::BufWriter;
-use std::io::{stdin, Result};
+use std::io::{stdin, BufWriter, Error, ErrorKind, Result};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 use utility::{create_error, Action};
@@ -24,9 +23,16 @@ pub struct UartTty {
 
 impl UartTty {
     pub fn new(dev_name: &str) -> Result<UartTty> {
-        // get_logfile() prints the logfile name to the terminal; do
-        // that before upsetting the default tty mode
-        let logfile = get_logfile();
+        let logfile = match get_logfile() {
+            Ok((logfile, path)) => {
+                println!("Created new logfile: {}", &path);
+                Some(logfile)
+            }
+            Err(e) => {
+                println!("Couldn't open logfile: {}", e);
+                None
+            }
+        };
         let dev = OpenOptions::new().read(true).write(true).open(dev_name)?;
         let tty_settings = get_tty_settings(STDIN_FILENO)?;
         set_tty_settings(STDIN_FILENO, &update_tty_settings(&tty_settings))?;
@@ -169,33 +175,11 @@ fn write_to_tty(buf: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn get_logfile_name() -> Result<String> {
-    let home_dir = match env::var("HOME") {
-        Ok(x) => x,
-        _ => return create_error("Couldn't retrieve $HOME"),
-    };
+fn get_logfile() -> Result<(BufWriter<File>, String)> {
+    let home_dir = env::var("HOME")
+        .map_err(|e| Error::new(ErrorKind::Other, format!("$HOME not in enviroment: {}", e)))?;
     let date_string = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-    Ok(format!(
-        "{}/Documents/lima-logs/log-{}",
-        home_dir, date_string
-    ))
-}
-
-fn get_logfile() -> Option<BufWriter<File>> {
-    let logfile_name = match get_logfile_name() {
-        Ok(x) => x,
-        Err(e) => {
-            println!("Couldn't get logfile name, not opening logfile: {}", e);
-            return None;
-        }
-    };
-    let logfile = match File::create(&logfile_name) {
-        Ok(x) => x,
-        Err(e) => {
-            println!("Couldn't open logfile at {}, error: {}", &logfile_name, e);
-            return None;
-        }
-    };
-    println!("Created new logfile: {}", &logfile_name);
-    Some(BufWriter::new(logfile))
+    let path = format!("{}/Documents/lima-logs/log-{}", home_dir, date_string);
+    let logfile = File::create(&path)?;
+    Ok((BufWriter::new(logfile), path))
 }
