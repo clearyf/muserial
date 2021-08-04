@@ -225,14 +225,35 @@ impl UartTtySM {
         Ok(vec![Action::Write(STDIN_FILENO, buf, TTY_WRITE)])
     }
 
-    fn uart_write_done(&mut self, _result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
-        // Ignore write errors
+    fn uart_write_done(&mut self, result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
+        if result == 0 {
+            println!("\r\nPort disconnected\r");
+            return self.start_teardown();
+        }
+        else if result < 0 {
+            return create_error(&format!("Got error from uart write: {}", result));
+        }
+        else if (result as usize) < buf.len() {
+            let new_buf = buf.split_off(result as usize);
+            return Ok(vec![Action::Write(self.uart_fd, new_buf, UART_WRITE)]);
+        }
         buf.resize(DEFAULT_READ_SIZE, 0);
         Ok(vec![Action::Read(STDIN_FILENO, buf, TTY_READ)])
     }
 
-    fn tty_write_done(&mut self, _result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
-        // Ignore write errors
+    fn tty_write_done(&mut self, result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
+        if result == 0 {
+            // Impossible; no tty available to write to as it's closed!
+            return self.start_teardown();
+        }
+        else if result < 0 {
+            return create_error(&format!("Got error from tty write: {}", result));
+        }
+        else if (result as usize) < buf.len() {
+            let new_buf = buf.split_off(result as usize);
+            return Ok(vec![Action::Write(STDIN_FILENO, new_buf, TTY_WRITE)]);
+        }
+
         buf.resize(DEFAULT_READ_SIZE, 0);
         Ok(vec![Action::Read(self.uart_fd, buf, UART_READ)])
     }
