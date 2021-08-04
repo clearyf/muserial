@@ -154,9 +154,11 @@ impl Drop for UartTty {
             self.logfile = None;
 
             // Compress logfile now that the file is closed
-            match Command::new("xz").arg(path).output() {
+            match Command::new("xz").arg(&path).output() {
                 Ok(output) => {
-                    if !output.status.success() {
+                    if output.status.success() {
+                        println!("Logfile saved to: {}.xz", path);
+                    } else {
                         println!("xz failed: {:?}", output);
                     }
                 }
