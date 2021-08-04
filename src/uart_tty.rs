@@ -52,10 +52,10 @@ impl UartTty {
 impl Drop for UartTty {
     fn drop(&mut self) {
         if let Err(e) = set_tty_settings(STDIN_FILENO, &self.tty_settings) {
-            println!("Couldn't restore tty settings: {}", e);
+            println!("\r\nCouldn't restore tty settings: {}", e);
         }
         if let Err(e) = set_tty_settings(self.uart_dev.as_raw_fd(), &self.uart_settings) {
-            println!("Couldn't restore uart settings: {}", e);
+            println!("\r\nCouldn't restore uart settings: {}", e);
         }
     }
 }
@@ -74,6 +74,58 @@ impl Drop for UartTty {
 //     TearDown,
 // }
 
+struct Transcript {
+    path: String,
+    file: BufWriter<File>,
+}
+
+impl Transcript {
+    fn new() -> Result<Transcript> {
+        match get_transcript() {
+            Ok((file, path)) => {
+                println!("\r\nOpened transcript: {}", path);
+                Ok(Transcript {
+                    path: path,
+                    file: file,
+                })
+            }
+            Err(e) => {
+                println!("\r\nCouldn't open transcript: {}", e);
+                Err(e)
+            }
+        }
+    }
+
+    fn log(&mut self, buf: &[u8]) -> Result<()> {
+        self.file.write_all(buf)
+    }
+}
+
+impl Drop for Transcript {
+    fn drop(&mut self) {
+        if let Err(e) = self.file.flush() {
+            println!("\r\nError while flushing transcript: {}", e);
+        }
+
+        // Close the file before compressing it
+        std::mem::drop(&mut self.file);
+
+        // Compress transcript now that the file is closed
+        match Command::new("xz").arg(&self.path).output() {
+            Ok(output) => {
+                if output.status.success() {
+                    println!("\r\nTranscript saved to: {}.xz", self.path);
+                } else {
+                    println!("\r\nxz failed: {:?}", output);
+                }
+            }
+            Err(e) => {
+                println!("\r\nxz failed to start: {}", e);
+            }
+        }
+    }
+}
+
 pub struct UartTtySM {
     uart_fd: i32,
     // When quit is requested by the user set this; in progress
@@ -81,27 +133,18 @@ pub struct UartTtySM {
     tear_down_in_progress: bool,
     // uart_state: UartState,
     // tty_state: TtyState,
-    logfile: Option<(BufWriter<File>, String)>,
+    transcript: Option<Transcript>,
 }
 
 impl UartTtySM {
     pub fn new(uart_fd: i32) -> UartTtySM {
-        let logfile = match get_logfile() {
-            Ok((logfile, path)) => {
-                println!("Created new logfile: {}", &path);
-                Some((logfile, path))
-            }
-            Err(e) => {
-                println!("Couldn't open logfile: {}", e);
-                None
-            }
-        };
+        let transcript = Transcript::new().ok();
         UartTtySM {
             uart_fd: uart_fd,
             tear_down_in_progress: false,
             // uart_state: UartState::Idle,
             // tty_state: TtyState::Idle,
-            logfile: logfile,
+            transcript: transcript,
         }
     }
 
@@ -173,11 +216,11 @@ impl UartTtySM {
             return create_error(&format!("Got error from uart read: {}", result));
         }
         // This is wrapped in a large bufwriter, so writes to the
-        // logfile should be every few seconds at most; such writes
+        // transcript should be every few seconds at most; such writes
         // should also be extremely fast on any kind of remotely
         // modern hw.
-        if let Some((logfile, _)) = &mut self.logfile {
-            logfile.write_all(&buf)?;
+        if let Some(transcript) = &mut self.transcript {
+            transcript.log(&buf)?;
         }
         Ok(vec![Action::Write(STDIN_FILENO, buf, TTY_WRITE)])
     }
@@ -203,32 +246,6 @@ impl UartTtySM {
             Action::Cancel(TTY_WRITE, TTY_WRITE_CANCEL),
             Action::Cancel(UART_WRITE, UART_WRITE_CANCEL),
         ])
-    }
-}
-
-impl Drop for UartTtySM {
-    fn drop(&mut self) {
-        if let Some((logfile, path)) = &mut self.logfile {
-            if let Err(e) = logfile.flush() {
-                println!("Error while flushing logfile: {}", e);
-            }
-            // Close the file before compressing it
-            std::mem::drop(logfile);
-
-            // Compress logfile now that the file is closed
-            match Command::new("xz").arg(&path).output() {
-                Ok(output) => {
-                    if output.status.success() {
-                        println!("Logfile saved to: {}.xz", path);
-                    } else {
-                        println!("xz failed: {:?}", output);
-                    }
-                }
-                Err(e) => {
-                    println!("xz failed to start: {}", e);
-                }
-            }
-        }
     }
 }
 
@@ -282,12 +299,12 @@ fn new_termios() -> libc::termios {
     }
 }
 
-fn get_logfile() -> Result<(BufWriter<File>, String)> {
+fn get_transcript() -> Result<(BufWriter<File>, String)> {
     let home_dir = env::var("HOME")
         .map_err(|e| Error::new(ErrorKind::Other, format!("$HOME not in enviroment: {}", e)))?;
     let date_string = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
     let path = format!("{}/Documents/lima-logs/log-{}", home_dir, date_string);
-    let logfile = File::create(&path)?;
+    let transcript = File::create(&path)?;
     // Default is 8kb, "but may change"
-    Ok((BufWriter::with_capacity(64 * 1024, logfile), path))
+    Ok((BufWriter::with_capacity(64 * 1024, transcript), path))
 }
