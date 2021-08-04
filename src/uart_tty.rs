@@ -210,7 +210,7 @@ impl UartTtySM {
 
     fn uart_read_done(&mut self, result: i32, buf: Vec<u8>) -> Result<Vec<Action>> {
         if result == 0 {
-            // EOF, port disconnected
+            println!("\r\nPort disconnected\r");
             return self.start_teardown();
         } else if result < 0 {
             return create_error(&format!("Got error from uart read: {}", result));
