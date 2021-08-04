@@ -3,7 +3,7 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::prelude::Write;
 use std::io::{BufWriter, Error, ErrorKind, Result};
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::process::Command;
 
 use utility::{create_error, Action};
@@ -11,33 +11,25 @@ use utility::{create_error, Action};
 use libc::*;
 
 const DEFAULT_READ_SIZE: usize = 1024;
-const STDIN_READ: u64 = 1;
+
+const TTY_READ: u64 = 1;
 const UART_READ: u64 = 2;
-const UART_READ_CANCEL: u64 = 3;
-const STDIN_READ_CANCEL: u64 = 3;
+const TTY_WRITE: u64 = 3;
+const UART_WRITE: u64 = 4;
+
+const TTY_READ_CANCEL: u64 = 5;
+const UART_READ_CANCEL: u64 = 6;
+const TTY_WRITE_CANCEL: u64 = 7;
+const UART_WRITE_CANCEL: u64 = 8;
 
 pub struct UartTty {
     uart_settings: libc::termios,
     tty_settings: libc::termios,
     uart_dev: File,
-    logfile: Option<(BufWriter<File>, String)>,
-    // When quit is requested by the user set this; in progress
-    // operations should be cancelled.
-    tear_down_in_progress: bool,
 }
 
 impl UartTty {
     pub fn new(dev_name: &str) -> Result<UartTty> {
-        let logfile = match get_logfile() {
-            Ok((logfile, path)) => {
-                println!("Created new logfile: {}", &path);
-                Some((logfile, path))
-            }
-            Err(e) => {
-                println!("Couldn't open logfile: {}", e);
-                None
-            }
-        };
         let dev = OpenOptions::new().read(true).write(true).open(dev_name)?;
         let tty_settings = get_tty_settings(STDIN_FILENO)?;
         set_tty_settings(STDIN_FILENO, &update_tty_settings(&tty_settings))?;
@@ -49,90 +41,10 @@ impl UartTty {
             uart_settings: uart_settings,
             tty_settings: tty_settings,
             uart_dev: dev,
-            logfile: logfile,
-            tear_down_in_progress: false,
         })
     }
 
-    pub fn init_actions(&self) -> Vec<Action> {
-        vec![
-            Action::Read(STDIN_FILENO, vec![0; DEFAULT_READ_SIZE], STDIN_READ),
-            Action::Read(self.uart_fd(), vec![0; DEFAULT_READ_SIZE], UART_READ),
-        ]
-    }
-
-    pub fn handle_poll(&mut self, result: i32, user_data: u64) -> Result<Action> {
-        if self.tear_down_in_progress {
-            // do nothing
-            return Ok(Action::NoOp);
-        }
-        if result != 1 {
-            return create_error(&format!("Got unexpected result from poll: {}", result));
-        }
-        if user_data == UART_READ_CANCEL {
-            self.tear_down_in_progress = true;
-            Ok(Action::NoOp)
-        }
-        else {
-            create_error(&format!("Got unknown user_data from poll: {}", user_data))
-        }
-    }
-
-    pub fn handle_buffer(
-        &mut self,
-        result: i32,
-        mut buf: Vec<u8>,
-        user_data: u64,
-    ) -> Result<Action> {
-        if self.tear_down_in_progress {
-            // do nothing
-            return Ok(Action::NoOp);
-        }
-        if result <= 0 {
-            // return create_error(&format!(
-            //     "Got unexpected result in handle_buffer: {}",
-            //     result
-            // ));
-            buf.clear();
-        }
-        else {
-            buf.resize(result as usize, 0);
-        }
-        if user_data == UART_READ {
-            self.copy_uart_to_tty(buf) }
-        else if user_data == STDIN_READ {
-            self.copy_tty_to_uart(buf)
-        } else {
-            create_error(&format!("Got unknown user_data from poll: {}", user_data))
-        }
-    }
-
-    fn copy_tty_to_uart(&mut self, mut buf: Vec<u8>) -> Result<Action> {
-        let control_o: u8 = 0x0f;
-        if buf.contains(&control_o) {
-            self.tear_down_in_progress = true;
-            Ok(Action::Cancel(UART_READ, UART_READ_CANCEL))
-        } else {
-            self.uart_dev.write_all(&buf)?;
-            buf.resize(DEFAULT_READ_SIZE, 0);
-            Ok(Action::Read(STDIN_FILENO, buf, STDIN_READ))
-        }
-    }
-
-    fn copy_uart_to_tty(&mut self, mut buf: Vec<u8>) -> Result<Action> {
-        if buf.len() == 0 {
-            self.tear_down_in_progress = true;
-            return Ok(Action::Cancel(STDIN_READ, STDIN_READ_CANCEL))
-        }
-        write_to_tty(&buf)?;
-        if let Some((logfile, _)) = &mut self.logfile {
-            logfile.write_all(&buf)?;
-        }
-        buf.resize(DEFAULT_READ_SIZE, 0);
-        Ok(Action::Read(self.uart_fd(), buf, UART_READ))
-    }
-
-    fn uart_fd(&self) -> RawFd {
+    pub fn uart_fd(&self) -> RawFd {
         self.uart_dev.as_raw_fd()
     }
 }
@@ -145,13 +57,163 @@ impl Drop for UartTty {
         if let Err(e) = set_tty_settings(self.uart_dev.as_raw_fd(), &self.uart_settings) {
             println!("Couldn't restore uart settings: {}", e);
         }
+    }
+}
+
+// enum UartState {
+//     Idle,
+//     Reading,
+//     Writing,
+//     TearDown,
+// }
+
+// enum TtyState {
+//     Idle,
+//     Reading,
+//     Writing,
+//     TearDown,
+// }
+
+pub struct UartTtySM {
+    uart_fd: i32,
+    // When quit is requested by the user set this; in progress
+    // operations should be cancelled.
+    tear_down_in_progress: bool,
+    // uart_state: UartState,
+    // tty_state: TtyState,
+    logfile: Option<(BufWriter<File>, String)>,
+}
+
+impl UartTtySM {
+    pub fn new(uart_fd: i32) -> UartTtySM {
+        let logfile = match get_logfile() {
+            Ok((logfile, path)) => {
+                println!("Created new logfile: {}", &path);
+                Some((logfile, path))
+            }
+            Err(e) => {
+                println!("Couldn't open logfile: {}", e);
+                None
+            }
+        };
+        UartTtySM {
+            uart_fd: uart_fd,
+            tear_down_in_progress: false,
+            // uart_state: UartState::Idle,
+            // tty_state: TtyState::Idle,
+            logfile: logfile,
+        }
+    }
+
+    pub fn init_actions(&self) -> Vec<Action> {
+        vec![
+            Action::Read(STDIN_FILENO, vec![0; DEFAULT_READ_SIZE], TTY_READ),
+            Action::Read(self.uart_fd, vec![0; DEFAULT_READ_SIZE], UART_READ),
+        ]
+    }
+
+    pub fn handle_other_ev(&mut self, result: i32, user_data: u64) -> Result<Vec<Action>> {
+        if self.tear_down_in_progress {
+            return Ok(vec![]);
+        }
+        if result != 1 {
+            return create_error(&format!(
+                "Got unexpected result in handle_other_ev: {}",
+                result
+            ));
+        }
+        create_error(&format!(
+            "Got unknown user_data in handle_other_ev: {}",
+            user_data
+        ))
+    }
+
+    pub fn handle_buffer_ev(
+        &mut self,
+        result: i32,
+        buf: Vec<u8>,
+        user_data: u64,
+    ) -> Result<Vec<Action>> {
+        if self.tear_down_in_progress {
+            return Ok(vec![]);
+        }
+        if user_data == UART_READ {
+            self.uart_read_done(result, buf)
+        } else if user_data == TTY_READ {
+            self.tty_read_done(result, buf)
+        } else if user_data == UART_WRITE {
+            self.uart_write_done(result, buf)
+        } else if user_data == TTY_WRITE {
+            self.tty_write_done(result, buf)
+        } else {
+            create_error(&format!(
+                "Got unknown user_data in handle_buffer_ev: {}",
+                user_data
+            ))
+        }
+    }
+
+    fn tty_read_done(&mut self, result: i32, buf: Vec<u8>) -> Result<Vec<Action>> {
+        if result < 0 {
+            return create_error(&format!("Got error from tty read: {}", result));
+        }
+        let control_o: u8 = 0x0f;
+        if buf.contains(&control_o) {
+            return self.start_teardown();
+        } else {
+            Ok(vec![Action::Write(self.uart_fd, buf, UART_WRITE)])
+        }
+    }
+
+    fn uart_read_done(&mut self, result: i32, buf: Vec<u8>) -> Result<Vec<Action>> {
+        if result == 0 {
+            // EOF, port disconnected
+            return self.start_teardown();
+        } else if result < 0 {
+            return create_error(&format!("Got error from uart read: {}", result));
+        }
+        // This is wrapped in a large bufwriter, so writes to the
+        // logfile should be every few seconds at most; such writes
+        // should also be extremely fast on any kind of remotely
+        // modern hw.
+        if let Some((logfile, _)) = &mut self.logfile {
+            logfile.write_all(&buf)?;
+        }
+        Ok(vec![Action::Write(STDIN_FILENO, buf, TTY_WRITE)])
+    }
+
+    fn uart_write_done(&mut self, _result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
+        // Ignore write errors
+        buf.resize(DEFAULT_READ_SIZE, 0);
+        Ok(vec![Action::Read(STDIN_FILENO, buf, TTY_READ)])
+    }
+
+    fn tty_write_done(&mut self, _result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
+        // Ignore write errors
+        buf.resize(DEFAULT_READ_SIZE, 0);
+        Ok(vec![Action::Read(self.uart_fd, buf, UART_READ)])
+    }
+
+    fn start_teardown(&mut self) -> Result<Vec<Action>> {
+        self.tear_down_in_progress = true;
+        // TODO Shouldn't need to send cancel for operations which are not in progress!
+        Ok(vec![
+            Action::Cancel(TTY_READ, TTY_READ_CANCEL),
+            Action::Cancel(UART_READ, UART_READ_CANCEL),
+            Action::Cancel(TTY_WRITE, TTY_WRITE_CANCEL),
+            Action::Cancel(UART_WRITE, UART_WRITE_CANCEL),
+        ])
+    }
+}
+
+impl Drop for UartTtySM {
+    fn drop(&mut self) {
         if let Some((logfile, path)) = &mut self.logfile {
             if let Err(e) = logfile.flush() {
                 println!("Error while flushing logfile: {}", e);
             }
-            // Steal the path and then close the file
-            let path = std::mem::take(path);
-            self.logfile = None;
+            // Close the file before compressing it
+            std::mem::drop(logfile);
 
             // Compress logfile now that the file is closed
             match Command::new("xz").arg(&path).output() {
@@ -220,20 +282,12 @@ fn new_termios() -> libc::termios {
     }
 }
 
-fn write_to_tty(buf: &[u8]) -> Result<()> {
-    // If this song & dance isn't done then the output is line-buffered.
-    let mut stdout = unsafe { File::from_raw_fd(STDIN_FILENO) };
-    stdout.write_all(&buf)?;
-    // otherwise std::fs::File closes the fd.
-    stdout.into_raw_fd();
-    Ok(())
-}
-
 fn get_logfile() -> Result<(BufWriter<File>, String)> {
     let home_dir = env::var("HOME")
         .map_err(|e| Error::new(ErrorKind::Other, format!("$HOME not in enviroment: {}", e)))?;
     let date_string = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
     let path = format!("{}/Documents/lima-logs/log-{}", home_dir, date_string);
     let logfile = File::create(&path)?;
-    Ok((BufWriter::new(logfile), path))
+    // Default is 8kb, "but may change"
+    Ok((BufWriter::with_capacity(64 * 1024, logfile), path))
 }

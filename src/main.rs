@@ -15,6 +15,7 @@ extern crate chrono;
 
 mod uart_tty;
 use uart_tty::UartTty;
+use uart_tty::UartTtySM;
 
 mod utility;
 use utility::{retry_on_eintr, Action};
@@ -46,65 +47,69 @@ fn mainloop(dev_name: &str) -> Result<()> {
     let mut ring = IoUring::new(4)?;
     let mut in_progress: HashMap<u64, OpInProgress> = HashMap::new();
     let (submitter, mut submission, mut completion) = ring.split();
-    let mut uart = UartTty::new(dev_name)?;
+    let uart = UartTty::new(dev_name)?;
+    let mut sm = UartTtySM::new(uart.uart_fd());
 
-    for action in uart.init_actions() {
-        handle_action(&mut submission, &mut in_progress, action)?;
-    }
-    while in_progress.len() > 0 {
+    handle_actions(&mut submission, &mut in_progress, sm.init_actions())?;
+    while !in_progress.is_empty() {
         submission.sync();
         retry_on_eintr(|| submitter.submit_and_wait(1))?;
         completion.sync();
         for cqe in &mut completion {
-            let action = match in_progress.remove(&cqe.user_data()) {
-                None => panic!("Got user_data in completion that doesn't exist: {}", cqe.user_data()),
+            let actions = match in_progress.remove(&cqe.user_data()) {
+                None => panic!(
+                    "Got user_data in cqe that doesn't exist: {}",
+                    cqe.user_data()
+                ),
                 Some(OpInProgress::ReadOp(mut buf)) => {
                     if cqe.result() >= 0 {
                         buf.resize(cqe.result() as usize, 0);
-                    }
-                    else {
+                    } else {
                         buf.clear();
                     }
-                    uart.handle_buffer(cqe.result(), buf, cqe.user_data())?
+                    sm.handle_buffer_ev(cqe.result(), buf, cqe.user_data())?
                 }
-                Some(OpInProgress::WriteOp(_)) => panic!("Not implemented yet"),
-                Some(OpInProgress::OtherOp) => uart.handle_poll(cqe.result(), cqe.user_data())?,
+                Some(OpInProgress::WriteOp(buf)) => {
+                    sm.handle_buffer_ev(cqe.result(), buf, cqe.user_data())?
+                }
+                Some(OpInProgress::OtherOp) => sm.handle_other_ev(cqe.result(), cqe.user_data())?,
             };
-            handle_action(&mut submission, &mut in_progress, action)?;
+            handle_actions(&mut submission, &mut in_progress, actions)?;
         }
     }
     Ok(())
 }
 
-fn handle_action(
+fn handle_actions(
     submission: &mut SubmissionQueue,
     buffers: &mut HashMap<u64, OpInProgress>,
-    action: Action,
+    actions: Vec<Action>,
 ) -> Result<usize> {
-    match action {
-        Action::NoOp => {
-            return Ok(0);
-        }
-        Action::Cancel(op_to_cancel, user_data) => {
-            submit_cancel(submission, op_to_cancel, user_data)?;
-            if let Some(_) = buffers.insert(user_data, OpInProgress::OtherOp) {
-                panic!("user_data {} already registered!", user_data);
+    let mut count = 0;
+    for action in actions {
+        match action {
+            Action::Cancel(op_to_cancel, user_data) => {
+                submit_cancel(submission, op_to_cancel, user_data)?;
+                if let Some(_) = buffers.insert(user_data, OpInProgress::OtherOp) {
+                    panic!("user_data {} already registered!", user_data);
+                }
+            }
+            Action::Read(fd, mut buf, user_data) => {
+                submit_read(submission, fd, &mut buf, user_data)?;
+                if let Some(_) = buffers.insert(user_data, OpInProgress::ReadOp(buf)) {
+                    panic!("user_data {} already registered!", user_data);
+                }
+            }
+            Action::Write(fd, mut buf, user_data) => {
+                submit_write(submission, fd, &mut buf, user_data)?;
+                if let Some(_) = buffers.insert(user_data, OpInProgress::WriteOp(buf)) {
+                    panic!("user_data {} already registered!", user_data);
+                }
             }
         }
-        Action::Read(fd, mut buf, user_data) => {
-            submit_read(submission, fd, &mut buf, user_data)?;
-            if let Some(_) = buffers.insert(user_data, OpInProgress::ReadOp(buf)) {
-                panic!("user_data {} already registered!", user_data);
-            }
-        }
-        Action::Write(fd, mut buf, user_data) => {
-            submit_write(submission, fd, &mut buf, user_data)?;
-            if let Some(_) = buffers.insert(user_data, OpInProgress::WriteOp(buf)) {
-                panic!("user_data {} already registered!", user_data);
-            }
-        }
+        count += 1;
     }
-    Ok(1)
+    Ok(count)
 }
 
 fn submit_read(sq: &mut SubmissionQueue, fd: i32, buf: &mut [u8], user_data: u64) -> Result<()> {
@@ -129,8 +134,7 @@ fn submit_cancel(sq: &mut SubmissionQueue, op_to_cancel: u64, user_data: u64) ->
     let entry = opcode::AsyncCancel::new(op_to_cancel)
         .build()
         .flags(io_uring::squeue::Flags::ASYNC)
-        .user_data(user_data)
-        ;
+        .user_data(user_data);
     unsafe { sq.push(&entry) }
         .map_err(|e| Error::new(ErrorKind::Other, format!("io-uring push error: {}", e)))
 }
