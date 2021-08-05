@@ -162,18 +162,12 @@ impl UartTtySM {
         ]
     }
 
-    pub fn handle_other_ev(&mut self, result: i32, user_data: u64) -> Result<Vec<Action>> {
+    pub fn handle_other_ev(&mut self, _result: i32, user_data: u64) -> Result<Vec<Action>> {
         match user_data {
             TTY_READ_CANCEL | UART_READ_CANCEL | TTY_WRITE_CANCEL | UART_WRITE_CANCEL => {
                 return Ok(vec![])
             }
             _ => (),
-        }
-        if result != 1 {
-            return create_error(&format!(
-                "Got unexpected result in handle_other_ev: {}",
-                result
-            ));
         }
         create_error(&format!(
             "Got unknown user_data in handle_other_ev: {}",
