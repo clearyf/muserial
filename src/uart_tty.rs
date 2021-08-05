@@ -1,26 +1,13 @@
-use std::env;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::prelude::Write;
-use std::io::{BufWriter, Error, ErrorKind, Result};
+use std::fs::{File, OpenOptions};
+use std::io::Result;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::process::Command;
 
-use utility::{create_error, Action};
+use transcript::Transcript;
+use utility::*;
 
 use libc::*;
 
 const DEFAULT_READ_SIZE: usize = 1024;
-
-const TTY_READ: u64 = 1;
-const UART_READ: u64 = 2;
-const TTY_WRITE: u64 = 3;
-const UART_WRITE: u64 = 4;
-
-const TTY_READ_CANCEL: u64 = 5;
-const UART_READ_CANCEL: u64 = 6;
-const TTY_WRITE_CANCEL: u64 = 7;
-const UART_WRITE_CANCEL: u64 = 8;
 
 pub struct UartTty {
     uart_settings: libc::termios,
@@ -56,58 +43,6 @@ impl Drop for UartTty {
         }
         if let Err(e) = set_tty_settings(self.uart_dev.as_raw_fd(), &self.uart_settings) {
             println!("\r\nCouldn't restore uart settings: {}", e);
-        }
-    }
-}
-
-pub struct Transcript {
-    path: String,
-    file: BufWriter<File>,
-}
-
-impl Transcript {
-    pub fn new() -> Result<Transcript> {
-        match get_transcript() {
-            Ok((file, path)) => {
-                println!("\r\nOpened transcript: {}", path);
-                Ok(Transcript {
-                    path: path,
-                    file: file,
-                })
-            }
-            Err(e) => {
-                println!("\r\nCouldn't open transcript: {}", e);
-                Err(e)
-            }
-        }
-    }
-
-    fn log(&mut self, buf: &[u8]) -> Result<()> {
-        self.file.write_all(buf)
-    }
-}
-
-impl Drop for Transcript {
-    fn drop(&mut self) {
-        if let Err(e) = self.file.flush() {
-            println!("\r\nError while flushing transcript: {}", e);
-        }
-
-        // Close the file before compressing it
-        std::mem::drop(&mut self.file);
-
-        // Compress transcript now that the file is closed
-        match Command::new("xz").arg(&self.path).output() {
-            Ok(output) => {
-                if output.status.success() {
-                    println!("\r\nTranscript saved to: {}.xz", self.path);
-                } else {
-                    println!("\r\nxz failed: {:?}", output);
-                }
-            }
-            Err(e) => {
-                println!("\r\nxz failed to start: {}", e);
-            }
         }
     }
 }
@@ -189,6 +124,12 @@ impl UartTtySM {
             self.uart_write_done(result, buf)
         } else if user_data == TTY_WRITE {
             self.tty_write_done(result, buf)
+        } else if user_data == TRANSCRIPT_FLUSH {
+            if let Some(transcript) = &mut self.transcript {
+                transcript.handle_buffer_ev(result, buf, user_data)
+            } else {
+                panic!("Got TRANSCRIPT_FLUSH in handle_buffer_ev, but no transcript is active");
+            }
         } else {
             create_error(&format!(
                 "Got unknown user_data in handle_buffer_ev: {}",
@@ -214,7 +155,7 @@ impl UartTtySM {
                 TtyState::Processing => TtyState::Writing,
                 e => panic!("tty_read_done in invalid state: {:?}", e),
             };
-            Ok(vec![Action::Write(self.uart_fd, buf, UART_WRITE)])
+            Ok(vec![Action::Write(self.uart_fd, buf, 0, UART_WRITE)])
         }
     }
 
@@ -235,7 +176,7 @@ impl UartTtySM {
                 e => panic!("uart_write_done in invalid state: {:?}", e),
             };
             let new_buf = buf.split_off(result as usize);
-            return Ok(vec![Action::Write(self.uart_fd, new_buf, UART_WRITE)]);
+            return Ok(vec![Action::Write(self.uart_fd, new_buf, 0, UART_WRITE)]);
         }
         self.tty_state = match &self.tty_state {
             TtyState::Processing => TtyState::Reading,
@@ -262,13 +203,13 @@ impl UartTtySM {
         // should also be extremely fast on any kind of remotely
         // modern hw.
         if let Some(transcript) = &mut self.transcript {
-            transcript.log(&buf)?;
+            transcript.log(&buf);
         }
         self.uart_state = match &self.uart_state {
             UartState::Processing => UartState::Writing,
             e => panic!("uart_read_done in invalid state: {:?}", e),
         };
-        Ok(vec![Action::Write(STDIN_FILENO, buf, TTY_WRITE)])
+        Ok(vec![Action::Write(STDIN_FILENO, buf, 0, TTY_WRITE)])
     }
 
     fn tty_write_done(&mut self, result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
@@ -288,7 +229,7 @@ impl UartTtySM {
                 e => panic!("uart_write_done in invalid state: {:?}", e),
             };
             let new_buf = buf.split_off(result as usize);
-            return Ok(vec![Action::Write(STDIN_FILENO, new_buf, TTY_WRITE)]);
+            return Ok(vec![Action::Write(STDIN_FILENO, new_buf, 0, TTY_WRITE)]);
         }
         self.uart_state = match &self.uart_state {
             UartState::Processing => UartState::Reading,
@@ -324,6 +265,11 @@ impl UartTtySM {
             }
             e => panic!("start_teardown in invalid state: {:?}", e),
         };
+        if let Some(transcript) = &mut self.transcript {
+            if let Some(transcript_action) = transcript.start_teardown() {
+                actions.push(transcript_action);
+            }
+        }
         Ok(actions)
     }
 }
@@ -335,17 +281,6 @@ mod tests {
     fn check_read(action: &Action, expected_fd: i32, buf_len: usize, expected_user_data: u64) {
         match &action {
             Action::Read(fd, buf, user_data) => {
-                assert_eq!(*fd, expected_fd);
-                assert_eq!(buf.len(), buf_len);
-                assert_eq!(*user_data, expected_user_data);
-            }
-            e => panic!("{:?}", e),
-        };
-    }
-
-    fn check_write(action: &Action, expected_fd: i32, buf_len: usize, expected_user_data: u64) {
-        match &action {
-            Action::Write(fd, buf, user_data) => {
                 assert_eq!(*fd, expected_fd);
                 assert_eq!(buf.len(), buf_len);
                 assert_eq!(*user_data, expected_user_data);
@@ -377,14 +312,14 @@ mod tests {
         // First tty read
         let tty_read_actions = sm.handle_buffer_ev(3, vec![97, 98, 99], TTY_READ).unwrap();
         assert_eq!(tty_read_actions.len(), 1);
-        check_write(&tty_read_actions[0], 42, 3, UART_WRITE);
+        check_write(&tty_read_actions[0], 42, 3, 0, UART_WRITE);
 
         // Write to uart was short
         let uart_short_write_actions = sm
             .handle_buffer_ev(1, vec![97, 98, 99], UART_WRITE)
             .unwrap();
         assert_eq!(uart_short_write_actions.len(), 1);
-        check_write(&uart_short_write_actions[0], 42, 2, UART_WRITE);
+        check_write(&uart_short_write_actions[0], 42, 2, 0, UART_WRITE);
 
         // Write to uart now ok
         let tty_ok_write_actions = sm.handle_buffer_ev(2, vec![98, 99], UART_WRITE).unwrap();
@@ -399,12 +334,12 @@ mod tests {
         // Now try uart
         let uart_read_actions = sm.handle_buffer_ev(3, vec![97, 98, 99], UART_READ).unwrap();
         assert_eq!(uart_read_actions.len(), 1);
-        check_write(&uart_read_actions[0], STDIN_FILENO, 3, TTY_WRITE);
+        check_write(&uart_read_actions[0], STDIN_FILENO, 3, 0, TTY_WRITE);
 
         // Tty write was short
         let tty_short_write_actions = sm.handle_buffer_ev(1, vec![97, 98, 99], TTY_WRITE).unwrap();
         assert_eq!(tty_short_write_actions.len(), 1);
-        check_write(&tty_short_write_actions[0], STDIN_FILENO, 2, TTY_WRITE);
+        check_write(&tty_short_write_actions[0], STDIN_FILENO, 2, 0, TTY_WRITE);
 
         // Tty write now ok
         let tty_ok_write_actions = sm.handle_buffer_ev(2, vec![98, 99], TTY_WRITE).unwrap();
@@ -469,14 +404,4 @@ fn new_termios() -> libc::termios {
         c_ispeed: 0,
         c_ospeed: 0,
     }
-}
-
-fn get_transcript() -> Result<(BufWriter<File>, String)> {
-    let home_dir = env::var("HOME")
-        .map_err(|e| Error::new(ErrorKind::Other, format!("$HOME not in enviroment: {}", e)))?;
-    let date_string = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-    let path = format!("{}/Documents/lima-logs/log-{}", home_dir, date_string);
-    let transcript = File::create(&path)?;
-    // Default is 8kb, "but may change"
-    Ok((BufWriter::with_capacity(64 * 1024, transcript), path))
 }

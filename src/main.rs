@@ -14,9 +14,11 @@ use argparse::{ArgumentParser, Store};
 extern crate chrono;
 
 mod uart_tty;
-use uart_tty::Transcript;
 use uart_tty::UartTty;
 use uart_tty::UartTtySM;
+
+mod transcript;
+use transcript::Transcript;
 
 mod utility;
 use utility::retry_on_eintr;
@@ -102,8 +104,8 @@ fn handle_actions(
                     panic!("user_data {} already registered!", user_data);
                 }
             }
-            Action::Write(fd, mut buf, user_data) => {
-                submit_write(submission, fd, &mut buf, user_data)?;
+            Action::Write(fd, mut buf, offset, user_data) => {
+                submit_write(submission, fd, &mut buf, offset, user_data)?;
                 if let Some(_) = buffers.insert(user_data, OpInProgress::WriteOp(buf)) {
                     panic!("user_data {} already registered!", user_data);
                 }
@@ -123,8 +125,15 @@ fn submit_read(sq: &mut SubmissionQueue, fd: i32, buf: &mut [u8], user_data: u64
         .map_err(|e| Error::new(ErrorKind::Other, format!("io-uring push error: {}", e)))
 }
 
-fn submit_write(sq: &mut SubmissionQueue, fd: i32, buf: &mut [u8], user_data: u64) -> Result<()> {
+fn submit_write(
+    sq: &mut SubmissionQueue,
+    fd: i32,
+    buf: &mut [u8],
+    offset: usize,
+    user_data: u64,
+) -> Result<()> {
     let entry = opcode::Write::new(Fd(fd), buf.as_mut_ptr(), buf.len().try_into().unwrap())
+        .offset(offset.try_into().unwrap())
         .build()
         .flags(io_uring::squeue::Flags::ASYNC)
         .user_data(user_data);
