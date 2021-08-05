@@ -60,20 +60,6 @@ impl Drop for UartTty {
     }
 }
 
-// enum UartState {
-//     Idle,
-//     Reading,
-//     Writing,
-//     TearDown,
-// }
-
-// enum TtyState {
-//     Idle,
-//     Reading,
-//     Writing,
-//     TearDown,
-// }
-
 struct Transcript {
     path: String,
     file: BufWriter<File>,
@@ -125,6 +111,20 @@ impl Drop for Transcript {
         }
     }
 }
+
+// enum UartState {
+//     Idle,
+//     Reading,
+//     Writing,
+//     TearDown,
+// }
+
+// enum TtyState {
+//     Idle,
+//     Reading,
+//     Writing,
+//     TearDown,
+// }
 
 pub struct UartTtySM {
     uart_fd: i32,
