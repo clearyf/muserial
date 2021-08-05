@@ -60,13 +60,13 @@ impl Drop for UartTty {
     }
 }
 
-struct Transcript {
+pub struct Transcript {
     path: String,
     file: BufWriter<File>,
 }
 
 impl Transcript {
-    fn new() -> Result<Transcript> {
+    pub fn new() -> Result<Transcript> {
         match get_transcript() {
             Ok((file, path)) => {
                 println!("\r\nOpened transcript: {}", path);
@@ -137,17 +137,8 @@ pub struct UartTtySM {
     transcript: Option<Transcript>,
 }
 
-pub enum EnableTranscript {
-    Yes,
-    No,
-}
-
 impl UartTtySM {
-    pub fn new(uart_fd: i32, use_transcript: EnableTranscript) -> UartTtySM {
-        let transcript = match use_transcript {
-            EnableTranscript::Yes => Transcript::new().ok(),
-            _ => None,
-        };
+    pub fn new(uart_fd: i32, transcript: Option<Transcript>) -> UartTtySM {
         UartTtySM {
             uart_fd: uart_fd,
             tty_state: TtyState::NotStarted,
@@ -343,92 +334,97 @@ impl UartTtySM {
     }
 }
 
-fn check_read(action: &Action, expected_fd: i32, buf_len: usize, expected_user_data: u64) {
-    match &action {
-        Action::Read(fd, buf, user_data) => {
-            assert_eq!(*fd, expected_fd);
-            assert_eq!(buf.len(), buf_len);
-            assert_eq!(*user_data, expected_user_data);
-        }
-        e => panic!("{:?}", e),
-    };
-}
+#[cfg(test)]
+mod tests {
+    use uart_tty::*;
 
-fn check_write(action: &Action, expected_fd: i32, buf_len: usize, expected_user_data: u64) {
-    match &action {
-        Action::Write(fd, buf, user_data) => {
-            assert_eq!(*fd, expected_fd);
-            assert_eq!(buf.len(), buf_len);
-            assert_eq!(*user_data, expected_user_data);
-        }
-        e => panic!("{:?}", e),
-    };
-}
+    fn check_read(action: &Action, expected_fd: i32, buf_len: usize, expected_user_data: u64) {
+        match &action {
+            Action::Read(fd, buf, user_data) => {
+                assert_eq!(*fd, expected_fd);
+                assert_eq!(buf.len(), buf_len);
+                assert_eq!(*user_data, expected_user_data);
+            }
+            e => panic!("{:?}", e),
+        };
+    }
 
-fn check_cancel(action: &Action, expected_cancel_data: u64, expected_user_data: u64) {
-    match &action {
-        Action::Cancel(cancel_data, user_data) => {
-            assert_eq!(*cancel_data, expected_cancel_data);
-            assert_eq!(*user_data, expected_user_data);
-        }
-        e => panic!("{:?}", e),
-    };
-}
+    fn check_write(action: &Action, expected_fd: i32, buf_len: usize, expected_user_data: u64) {
+        match &action {
+            Action::Write(fd, buf, user_data) => {
+                assert_eq!(*fd, expected_fd);
+                assert_eq!(buf.len(), buf_len);
+                assert_eq!(*user_data, expected_user_data);
+            }
+            e => panic!("{:?}", e),
+        };
+    }
 
-#[test]
-fn test_uartttysm() {
-    let mut sm = UartTtySM::new(42, EnableTranscript::No);
+    fn check_cancel(action: &Action, expected_cancel_data: u64, expected_user_data: u64) {
+        match &action {
+            Action::Cancel(cancel_data, user_data) => {
+                assert_eq!(*cancel_data, expected_cancel_data);
+                assert_eq!(*user_data, expected_user_data);
+            }
+            e => panic!("{:?}", e),
+        };
+    }
 
-    // Check init actions
-    let init_actions = sm.init_actions();
-    assert_eq!(init_actions.len(), 2);
-    check_read(&init_actions[0], STDIN_FILENO, DEFAULT_READ_SIZE, TTY_READ);
-    check_read(&init_actions[1], 42, DEFAULT_READ_SIZE, UART_READ);
+    #[test]
+    fn test_uartttysm() {
+        let mut sm = UartTtySM::new(42, None);
 
-    // First tty read
-    let tty_read_actions = sm.handle_buffer_ev(3, vec![97, 98, 99], TTY_READ).unwrap();
-    assert_eq!(tty_read_actions.len(), 1);
-    check_write(&tty_read_actions[0], 42, 3, UART_WRITE);
+        // Check init actions
+        let init_actions = sm.init_actions();
+        assert_eq!(init_actions.len(), 2);
+        check_read(&init_actions[0], STDIN_FILENO, DEFAULT_READ_SIZE, TTY_READ);
+        check_read(&init_actions[1], 42, DEFAULT_READ_SIZE, UART_READ);
 
-    // Write to uart was short
-    let uart_short_write_actions = sm
-        .handle_buffer_ev(1, vec![97, 98, 99], UART_WRITE)
-        .unwrap();
-    assert_eq!(uart_short_write_actions.len(), 1);
-    check_write(&uart_short_write_actions[0], 42, 2, UART_WRITE);
+        // First tty read
+        let tty_read_actions = sm.handle_buffer_ev(3, vec![97, 98, 99], TTY_READ).unwrap();
+        assert_eq!(tty_read_actions.len(), 1);
+        check_write(&tty_read_actions[0], 42, 3, UART_WRITE);
 
-    // Write to uart now ok
-    let tty_ok_write_actions = sm.handle_buffer_ev(2, vec![98, 99], UART_WRITE).unwrap();
-    assert_eq!(tty_ok_write_actions.len(), 1);
-    check_read(
-        &tty_ok_write_actions[0],
-        STDIN_FILENO,
-        DEFAULT_READ_SIZE,
-        TTY_READ,
-    );
+        // Write to uart was short
+        let uart_short_write_actions = sm
+            .handle_buffer_ev(1, vec![97, 98, 99], UART_WRITE)
+            .unwrap();
+        assert_eq!(uart_short_write_actions.len(), 1);
+        check_write(&uart_short_write_actions[0], 42, 2, UART_WRITE);
 
-    // Now try uart
-    let uart_read_actions = sm.handle_buffer_ev(3, vec![97, 98, 99], UART_READ).unwrap();
-    assert_eq!(uart_read_actions.len(), 1);
-    check_write(&uart_read_actions[0], STDIN_FILENO, 3, TTY_WRITE);
+        // Write to uart now ok
+        let tty_ok_write_actions = sm.handle_buffer_ev(2, vec![98, 99], UART_WRITE).unwrap();
+        assert_eq!(tty_ok_write_actions.len(), 1);
+        check_read(
+            &tty_ok_write_actions[0],
+            STDIN_FILENO,
+            DEFAULT_READ_SIZE,
+            TTY_READ,
+        );
 
-    // Tty write was short
-    let tty_short_write_actions = sm.handle_buffer_ev(1, vec![97, 98, 99], TTY_WRITE).unwrap();
-    assert_eq!(tty_short_write_actions.len(), 1);
-    check_write(&tty_short_write_actions[0], STDIN_FILENO, 2, TTY_WRITE);
+        // Now try uart
+        let uart_read_actions = sm.handle_buffer_ev(3, vec![97, 98, 99], UART_READ).unwrap();
+        assert_eq!(uart_read_actions.len(), 1);
+        check_write(&uart_read_actions[0], STDIN_FILENO, 3, TTY_WRITE);
 
-    // Tty write now ok
-    let tty_ok_write_actions = sm.handle_buffer_ev(2, vec![98, 99], TTY_WRITE).unwrap();
-    assert_eq!(tty_ok_write_actions.len(), 1);
-    check_read(&tty_ok_write_actions[0], 42, DEFAULT_READ_SIZE, UART_READ);
+        // Tty write was short
+        let tty_short_write_actions = sm.handle_buffer_ev(1, vec![97, 98, 99], TTY_WRITE).unwrap();
+        assert_eq!(tty_short_write_actions.len(), 1);
+        check_write(&tty_short_write_actions[0], STDIN_FILENO, 2, TTY_WRITE);
 
-    // Tty read to quit
-    let tty_read_actions = sm.handle_buffer_ev(1, vec![15], TTY_READ).unwrap();
-    assert_eq!(tty_read_actions.len(), 1);
-    check_cancel(&tty_read_actions[0], UART_READ, UART_READ_CANCEL);
+        // Tty write now ok
+        let tty_ok_write_actions = sm.handle_buffer_ev(2, vec![98, 99], TTY_WRITE).unwrap();
+        assert_eq!(tty_ok_write_actions.len(), 1);
+        check_read(&tty_ok_write_actions[0], 42, DEFAULT_READ_SIZE, UART_READ);
 
-    let uart_read_cancel_actions = sm.handle_other_ev(-1, UART_READ_CANCEL).unwrap();
-    assert!(uart_read_cancel_actions.is_empty());
+        // Tty read to quit
+        let tty_read_actions = sm.handle_buffer_ev(1, vec![15], TTY_READ).unwrap();
+        assert_eq!(tty_read_actions.len(), 1);
+        check_cancel(&tty_read_actions[0], UART_READ, UART_READ_CANCEL);
+
+        let uart_read_cancel_actions = sm.handle_other_ev(-1, UART_READ_CANCEL).unwrap();
+        assert!(uart_read_cancel_actions.is_empty());
+    }
 }
 
 fn get_tty_settings(fd: RawFd) -> Result<libc::termios> {
