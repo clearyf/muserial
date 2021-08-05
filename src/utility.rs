@@ -1,5 +1,6 @@
 use std::io::{Error, ErrorKind, Result};
 
+#[derive(Debug)]
 pub enum Action {
     Read(i32, Vec<u8>, u64),
     Write(i32, Vec<u8>, u64),

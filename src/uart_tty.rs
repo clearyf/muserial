@@ -112,43 +112,63 @@ impl Drop for Transcript {
     }
 }
 
-// enum UartState {
-//     Idle,
-//     Reading,
-//     Writing,
-//     TearDown,
-// }
+#[derive(Debug)]
+enum TtyState {
+    NotStarted,
+    Reading,
+    Processing,
+    Writing,
+    TearDown,
+}
 
-// enum TtyState {
-//     Idle,
-//     Reading,
-//     Writing,
-//     TearDown,
-// }
+#[derive(Debug)]
+enum UartState {
+    NotStarted,
+    Reading,
+    Processing,
+    Writing,
+    TearDown,
+}
 
 pub struct UartTtySM {
     uart_fd: i32,
     // When quit is requested by the user set this; in progress
     // operations should be cancelled.
     tear_down_in_progress: bool,
-    // uart_state: UartState,
-    // tty_state: TtyState,
+    uart_state: UartState,
+    tty_state: TtyState,
     transcript: Option<Transcript>,
 }
 
+pub enum EnableTranscript {
+    Yes,
+    No,
+}
+
 impl UartTtySM {
-    pub fn new(uart_fd: i32) -> UartTtySM {
-        let transcript = Transcript::new().ok();
+    pub fn new(uart_fd: i32, use_transcript: EnableTranscript) -> UartTtySM {
+        let transcript = match use_transcript {
+            EnableTranscript::Yes => Transcript::new().ok(),
+            _ => None,
+        };
         UartTtySM {
             uart_fd: uart_fd,
             tear_down_in_progress: false,
-            // uart_state: UartState::Idle,
-            // tty_state: TtyState::Idle,
+            tty_state: TtyState::NotStarted,
+            uart_state: UartState::NotStarted,
             transcript: transcript,
         }
     }
 
-    pub fn init_actions(&self) -> Vec<Action> {
+    pub fn init_actions(&mut self) -> Vec<Action> {
+        self.tty_state = match self.tty_state {
+            TtyState::NotStarted => TtyState::Reading,
+            _ => panic!("UartTtySM::init_actions called multiple times!"),
+        };
+        self.uart_state = match self.uart_state {
+            UartState::NotStarted => UartState::Reading,
+            _ => panic!("UartTtySM::init_actions called multiple times!"),
+        };
         vec![
             Action::Read(STDIN_FILENO, vec![0; DEFAULT_READ_SIZE], TTY_READ),
             Action::Read(self.uart_fd, vec![0; DEFAULT_READ_SIZE], UART_READ),
@@ -197,6 +217,10 @@ impl UartTtySM {
     }
 
     fn tty_read_done(&mut self, result: i32, buf: Vec<u8>) -> Result<Vec<Action>> {
+        self.tty_state = match &self.tty_state {
+            TtyState::Reading => TtyState::Processing,
+            e => panic!("tty_read_done in invalid state: {:?}", e),
+        };
         if result < 0 {
             return create_error(&format!("Got error from tty read: {}", result));
         }
@@ -204,11 +228,46 @@ impl UartTtySM {
         if buf.contains(&control_o) {
             return self.start_teardown();
         } else {
+            self.tty_state = match &self.tty_state {
+                TtyState::Processing => TtyState::Writing,
+                e => panic!("tty_read_done in invalid state: {:?}", e),
+            };
             Ok(vec![Action::Write(self.uart_fd, buf, UART_WRITE)])
         }
     }
 
+    fn uart_write_done(&mut self, result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
+        self.tty_state = match &self.tty_state {
+            TtyState::Writing => TtyState::Processing,
+            e => panic!("uart_write_done in invalid state: {:?}", e),
+        };
+        if result == 0 {
+            println!("\r\nPort disconnected\r");
+            return self.start_teardown();
+        } else if result < 0 {
+            return create_error(&format!("Got error from uart write: {}", result));
+        }
+        else if (result as usize) < buf.len() {
+            self.tty_state = match &self.tty_state {
+                TtyState::Processing => TtyState::Writing,
+                e => panic!("uart_write_done in invalid state: {:?}", e),
+            };
+            let new_buf = buf.split_off(result as usize);
+            return Ok(vec![Action::Write(self.uart_fd, new_buf, UART_WRITE)]);
+        }
+        self.tty_state = match &self.tty_state {
+            TtyState::Processing => TtyState::Reading,
+            e => panic!("uart_write_done in invalid state: {:?}", e),
+        };
+        buf.resize(DEFAULT_READ_SIZE, 0);
+        Ok(vec![Action::Read(STDIN_FILENO, buf, TTY_READ)])
+    }
+
     fn uart_read_done(&mut self, result: i32, buf: Vec<u8>) -> Result<Vec<Action>> {
+        self.uart_state = match &self.uart_state {
+            UartState::Reading => UartState::Processing,
+            e => panic!("uart_read_done in invalid state: {:?}", e),
+        };
         if result == 0 {
             println!("\r\nPort disconnected\r");
             return self.start_teardown();
@@ -222,52 +281,150 @@ impl UartTtySM {
         if let Some(transcript) = &mut self.transcript {
             transcript.log(&buf)?;
         }
+        self.uart_state = match &self.uart_state {
+            UartState::Processing => UartState::Writing,
+            e => panic!("uart_read_done in invalid state: {:?}", e),
+        };
         Ok(vec![Action::Write(STDIN_FILENO, buf, TTY_WRITE)])
     }
 
-    fn uart_write_done(&mut self, result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
-        if result == 0 {
-            println!("\r\nPort disconnected\r");
-            return self.start_teardown();
-        }
-        else if result < 0 {
-            return create_error(&format!("Got error from uart write: {}", result));
-        }
-        else if (result as usize) < buf.len() {
-            let new_buf = buf.split_off(result as usize);
-            return Ok(vec![Action::Write(self.uart_fd, new_buf, UART_WRITE)]);
-        }
-        buf.resize(DEFAULT_READ_SIZE, 0);
-        Ok(vec![Action::Read(STDIN_FILENO, buf, TTY_READ)])
-    }
-
     fn tty_write_done(&mut self, result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
+        self.uart_state = match &self.uart_state {
+            UartState::Writing => UartState::Processing,
+            e => panic!("tty_write_done in invalid state: {:?}", e),
+        };
         if result == 0 {
             // Impossible; no tty available to write to as it's closed!
             return self.start_teardown();
-        }
-        else if result < 0 {
+        } else if result < 0 {
             return create_error(&format!("Got error from tty write: {}", result));
         }
         else if (result as usize) < buf.len() {
+            self.uart_state = match &self.uart_state {
+                UartState::Processing => UartState::Writing,
+                e => panic!("uart_write_done in invalid state: {:?}", e),
+            };
             let new_buf = buf.split_off(result as usize);
             return Ok(vec![Action::Write(STDIN_FILENO, new_buf, TTY_WRITE)]);
         }
-
+        self.uart_state = match &self.uart_state {
+            UartState::Processing => UartState::Reading,
+            e => panic!("uart_write_done in invalid state: {:?}", e),
+        };
         buf.resize(DEFAULT_READ_SIZE, 0);
         Ok(vec![Action::Read(self.uart_fd, buf, UART_READ)])
     }
 
     fn start_teardown(&mut self) -> Result<Vec<Action>> {
         self.tear_down_in_progress = true;
-        // TODO Shouldn't need to send cancel for operations which are not in progress!
-        Ok(vec![
-            Action::Cancel(TTY_READ, TTY_READ_CANCEL),
-            Action::Cancel(UART_READ, UART_READ_CANCEL),
-            Action::Cancel(TTY_WRITE, TTY_WRITE_CANCEL),
-            Action::Cancel(UART_WRITE, UART_WRITE_CANCEL),
-        ])
+        let mut actions = Vec::new();
+        self.tty_state = match &self.tty_state {
+            TtyState::Processing => TtyState::TearDown,
+            TtyState::Reading => {
+                actions.push(Action::Cancel(TTY_READ, TTY_READ_CANCEL));
+                TtyState::TearDown
+            }
+            TtyState::Writing => {
+                actions.push(Action::Cancel(UART_WRITE, UART_WRITE_CANCEL));
+                TtyState::TearDown
+            }
+            e => panic!("start_teardown in invalid state: {:?}", e),
+        };
+        self.uart_state = match &self.uart_state {
+            UartState::Processing => UartState::TearDown,
+            UartState::Reading => {
+                actions.push(Action::Cancel(UART_READ, UART_READ_CANCEL));
+                UartState::TearDown
+            }
+            UartState::Writing => {
+                actions.push(Action::Cancel(TTY_WRITE, TTY_WRITE_CANCEL));
+                UartState::TearDown
+            }
+            e => panic!("start_teardown in invalid state: {:?}", e),
+        };
+        Ok(actions)
     }
+}
+
+fn check_read(action: &Action, expected_fd: i32, buf_len: usize, expected_user_data: u64) {
+    match &action {
+        Action::Read(fd, buf, user_data) => {
+            assert_eq!(*fd, expected_fd);
+            assert_eq!(buf.len(), buf_len);
+            assert_eq!(*user_data, expected_user_data);
+        }
+        e => panic!("{:?}", e),
+    };
+}
+
+fn check_write(action: &Action, expected_fd: i32, buf_len: usize, expected_user_data: u64) {
+    match &action {
+        Action::Write(fd, buf, user_data) => {
+            assert_eq!(*fd, expected_fd);
+            assert_eq!(buf.len(), buf_len);
+            assert_eq!(*user_data, expected_user_data);
+        }
+        e => panic!("{:?}", e),
+    };
+}
+
+fn check_cancel(action: &Action, expected_cancel_data: u64, expected_user_data: u64) {
+    match &action {
+        Action::Cancel(cancel_data, user_data) => {
+            assert_eq!(*cancel_data, expected_cancel_data);
+            assert_eq!(*user_data, expected_user_data);
+        }
+        e => panic!("{:?}", e),
+    };
+}
+
+#[test]
+fn test_uartttysm() {
+    let mut sm = UartTtySM::new(42, EnableTranscript::No);
+
+    // Check init actions
+    let init_actions = sm.init_actions();
+    assert_eq!(init_actions.len(), 2);
+    check_read(&init_actions[0], STDIN_FILENO, DEFAULT_READ_SIZE, TTY_READ);
+    check_read(&init_actions[1], 42, DEFAULT_READ_SIZE, UART_READ);
+
+    // First tty read
+    let tty_read_actions = sm.handle_buffer_ev(3, vec![97,98,99], TTY_READ).unwrap();
+    assert_eq!(tty_read_actions.len(), 1);
+    check_write(&tty_read_actions[0], 42, 3, UART_WRITE);
+
+    // Write to uart was short
+    let uart_short_write_actions = sm.handle_buffer_ev(1, vec![97, 98, 99], UART_WRITE).unwrap();
+    assert_eq!(uart_short_write_actions.len(), 1);
+    check_write(&uart_short_write_actions[0], 42, 2, UART_WRITE);
+
+    // Write to uart now ok
+    let tty_ok_write_actions = sm.handle_buffer_ev(2, vec![98, 99], UART_WRITE).unwrap();
+    assert_eq!(tty_ok_write_actions.len(), 1);
+    check_read(&tty_ok_write_actions[0], STDIN_FILENO, DEFAULT_READ_SIZE, TTY_READ);
+
+    // Now try uart
+    let uart_read_actions = sm.handle_buffer_ev(3, vec![97,98,99], UART_READ).unwrap();
+    assert_eq!(uart_read_actions.len(), 1);
+    check_write(&uart_read_actions[0], STDIN_FILENO, 3, TTY_WRITE);
+
+    // Tty write was short
+    let tty_short_write_actions = sm.handle_buffer_ev(1, vec![97, 98, 99], TTY_WRITE).unwrap();
+    assert_eq!(tty_short_write_actions.len(), 1);
+    check_write(&tty_short_write_actions[0], STDIN_FILENO, 2, TTY_WRITE);
+
+    // Tty write now ok
+    let tty_ok_write_actions = sm.handle_buffer_ev(2, vec![98, 99], TTY_WRITE).unwrap();
+    assert_eq!(tty_ok_write_actions.len(), 1);
+    check_read(&tty_ok_write_actions[0], 42, DEFAULT_READ_SIZE, UART_READ);
+
+    // Tty read to quit
+    let tty_read_actions = sm.handle_buffer_ev(1, vec![15], TTY_READ).unwrap();
+    assert_eq!(tty_read_actions.len(), 1);
+    check_cancel(&tty_read_actions[0], UART_READ, UART_READ_CANCEL);
+
+    let uart_read_cancel_actions = sm.handle_other_ev(-1, UART_READ_CANCEL).unwrap();
+    assert!(uart_read_cancel_actions.is_empty());
 }
 
 fn get_tty_settings(fd: RawFd) -> Result<libc::termios> {

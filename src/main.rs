@@ -14,11 +14,13 @@ use argparse::{ArgumentParser, Store};
 extern crate chrono;
 
 mod uart_tty;
+use uart_tty::EnableTranscript;
 use uart_tty::UartTty;
 use uart_tty::UartTtySM;
 
 mod utility;
-use utility::{retry_on_eintr, Action};
+use utility::retry_on_eintr;
+use utility::Action;
 
 fn main() {
     let mut dev_name = "/dev/ttyUSB0".to_string();
@@ -32,7 +34,7 @@ fn main() {
     println!("Opening uart: {}", dev_name);
 
     match mainloop(&dev_name) {
-        Ok(()) => println!("\nExiting"),
+        Ok(()) => (),
         Err(why) => println!("\nError: {}", why),
     }
 }
@@ -48,7 +50,7 @@ fn mainloop(dev_name: &str) -> Result<()> {
     let mut in_progress: HashMap<u64, OpInProgress> = HashMap::new();
     let (submitter, mut submission, mut completion) = ring.split();
     let uart = UartTty::new(dev_name)?;
-    let mut sm = UartTtySM::new(uart.uart_fd());
+    let mut sm = UartTtySM::new(uart.uart_fd(), EnableTranscript::Yes);
 
     handle_actions(&mut submission, &mut in_progress, sm.init_actions())?;
     while !in_progress.is_empty() {
