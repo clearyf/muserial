@@ -23,7 +23,7 @@ use utility::retry_on_eintr;
 use utility::Action;
 
 fn main() {
-    let mut dev_name = "/dev/ttyUSB0".to_string();
+    let mut dev_name = String::from("/dev/ttyUSB0");
     {
         let mut ap = ArgumentParser::new();
         ap.set_description("Connect to a serial line.");
