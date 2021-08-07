@@ -1,9 +1,16 @@
+// use std::borrow::BorrowMut;
+use std::cell::Cell;
+// use std::cell::RefCell;
+// use std::cell::RefMut;
+use std::rc::Rc;
+
 use std::fs::{File, OpenOptions};
 use std::io::Result;
 use std::os::unix::io::{AsRawFd, RawFd};
 
-use transcript::Transcript;
-use utility::*;
+use crate::reactor::*;
+use crate::transcript::*;
+use crate::utility::*;
 
 use libc::*;
 
@@ -30,10 +37,6 @@ impl UartTty {
             uart_dev: dev,
         })
     }
-
-    pub fn uart_fd(&self) -> RawFd {
-        self.uart_dev.as_raw_fd()
-    }
 }
 
 impl Drop for UartTty {
@@ -47,312 +50,520 @@ impl Drop for UartTty {
     }
 }
 
-#[derive(Debug)]
-enum TtyState {
-    NotStarted,
-    Reading,
-    Processing,
-    Writing,
-    TearDown,
+impl AsRawFd for UartTty {
+    fn as_raw_fd(&self) -> RawFd {
+        self.uart_dev.as_raw_fd()
+    }
 }
 
-#[derive(Debug)]
-enum UartState {
-    NotStarted,
-    Reading,
+#[derive(Copy, Clone, Debug)]
+enum State {
+    Reading(u64),
     Processing,
-    Writing,
-    TearDown,
+    Writing(u64),
+    TearDown(u64),
+    TornDown,
 }
 
 pub struct UartTtySM {
-    uart_fd: i32,
-    uart_state: UartState,
-    tty_state: TtyState,
-    transcript: Option<Transcript>,
+    uart: Box<dyn AsRawFd>,
+    uart_state: Cell<State>,
+    tty_state: Cell<State>,
+    transcript: Option<Rc<Transcript>>,
 }
 
 impl UartTtySM {
-    pub fn new(uart_fd: i32, transcript: Option<Transcript>) -> UartTtySM {
-        UartTtySM {
-            uart_fd: uart_fd,
-            tty_state: TtyState::NotStarted,
-            uart_state: UartState::NotStarted,
-            transcript: transcript,
-        }
+    pub fn init_actions(
+        reactor: &mut dyn ReactorSubmitter,
+        uart: Box<dyn AsRawFd>,
+        transcript: Option<Transcript>,
+    ) -> Rc<UartTtySM> {
+        let sm = Rc::new(UartTtySM {
+            uart: uart,
+            tty_state: Cell::new(State::Processing),
+            uart_state: Cell::new(State::Processing),
+            transcript: transcript.map(|x| Rc::new(x)),
+        });
+        let sm_to_return = Rc::clone(&sm);
+        let sm2 = Rc::clone(&sm);
+        sm2.tty_state.set(State::Reading(reactor.submit_read(
+            STDIN_FILENO,
+            vec![0; DEFAULT_READ_SIZE],
+            Box::new(move |reactor, result, buf, _| tty_read_done(reactor, sm, result, buf)),
+        )));
+        let sm3 = Rc::clone(&sm2);
+        sm3.uart_state.set(State::Reading(reactor.submit_read(
+            sm2.uart.as_raw_fd(),
+            vec![0; DEFAULT_READ_SIZE],
+            Box::new(move |reactor, result, buf, _| uart_read_done(reactor, sm2, result, buf)),
+        )));
+        sm_to_return
     }
+}
 
-    pub fn init_actions(&mut self) -> Vec<Action> {
-        self.tty_state = match self.tty_state {
-            TtyState::NotStarted => TtyState::Reading,
-            _ => panic!("UartTtySM::init_actions called multiple times!"),
-        };
-        self.uart_state = match self.uart_state {
-            UartState::NotStarted => UartState::Reading,
-            _ => panic!("UartTtySM::init_actions called multiple times!"),
-        };
-        vec![
-            Action::Read(STDIN_FILENO, vec![0; DEFAULT_READ_SIZE], TTY_READ),
-            Action::Read(self.uart_fd, vec![0; DEFAULT_READ_SIZE], UART_READ),
-        ]
+fn tty_read_done(reactor: &mut dyn ReactorSubmitter, sm: Rc<UartTtySM>, result: i32, buf: Vec<u8>) {
+    sm.tty_state.set(match sm.tty_state.get() {
+        State::Reading(_) => State::Processing,
+        State::TearDown(_) => return,
+        e => panic!("tty_read_done in invalid state: {:?}", e),
+    });
+    if result < 0 {
+        panic!("Got error from tty read: {}", result);
     }
-
-    pub fn handle_other_ev(&mut self, _result: i32, user_data: u64) -> Result<Vec<Action>> {
-        match user_data {
-            TTY_READ_CANCEL | UART_READ_CANCEL | TTY_WRITE_CANCEL | UART_WRITE_CANCEL => {
-                return Ok(vec![])
-            }
-            _ => (),
-        }
-        create_error(&format!(
-            "Got unknown user_data in handle_other_ev: {}",
-            user_data
-        ))
-    }
-
-    pub fn handle_buffer_ev(
-        &mut self,
-        result: i32,
-        buf: Vec<u8>,
-        user_data: u64,
-    ) -> Result<Vec<Action>> {
-        if user_data == UART_READ {
-            self.uart_read_done(result, buf)
-        } else if user_data == TTY_READ {
-            self.tty_read_done(result, buf)
-        } else if user_data == UART_WRITE {
-            self.uart_write_done(result, buf)
-        } else if user_data == TTY_WRITE {
-            self.tty_write_done(result, buf)
-        } else if user_data == TRANSCRIPT_FLUSH {
-            if let Some(transcript) = &mut self.transcript {
-                transcript.handle_buffer_ev(result, buf, user_data)
-            } else {
-                panic!("Got TRANSCRIPT_FLUSH in handle_buffer_ev, but no transcript is active");
-            }
-        } else {
-            create_error(&format!(
-                "Got unknown user_data in handle_buffer_ev: {}",
-                user_data
-            ))
-        }
-    }
-
-    fn tty_read_done(&mut self, result: i32, buf: Vec<u8>) -> Result<Vec<Action>> {
-        self.tty_state = match &self.tty_state {
-            TtyState::Reading => TtyState::Processing,
-            TtyState::TearDown => return Ok(vec![]),
+    let control_o: u8 = 0x0f;
+    if buf.contains(&control_o) {
+        return start_uart_teardown(reactor, sm);
+    } else {
+        let sm2 = Rc::clone(&sm);
+        let id = reactor.submit_write(
+            sm.uart.as_raw_fd(),
+            buf,
+            0,
+            Box::new(move |reactor, result, buf, _| uart_write_done(reactor, sm2, result, buf)),
+        );
+        sm.tty_state.set(match sm.tty_state.get() {
+            State::Processing => State::Writing(id),
             e => panic!("tty_read_done in invalid state: {:?}", e),
-        };
-        if result < 0 {
-            return create_error(&format!("Got error from tty read: {}", result));
-        }
-        let control_o: u8 = 0x0f;
-        if buf.contains(&control_o) {
-            return self.start_teardown();
-        } else {
-            self.tty_state = match &self.tty_state {
-                TtyState::Processing => TtyState::Writing,
-                e => panic!("tty_read_done in invalid state: {:?}", e),
-            };
-            Ok(vec![Action::Write(self.uart_fd, buf, 0, UART_WRITE)])
-        }
+        });
     }
+}
 
-    fn uart_write_done(&mut self, result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
-        self.tty_state = match &self.tty_state {
-            TtyState::Writing => TtyState::Processing,
-            TtyState::TearDown => return Ok(vec![]),
+fn uart_write_done(
+    reactor: &mut dyn ReactorSubmitter,
+    sm: Rc<UartTtySM>,
+    result: i32,
+    mut buf: Vec<u8>,
+) {
+    sm.tty_state.set(match sm.tty_state.get() {
+        State::Writing(_) => State::Processing,
+        State::TearDown(_) => return,
+        State::TornDown => return,
+        e => panic!("uart_write_done in invalid state: {:?}", e),
+    });
+    if result == 0 {
+        println!("\r\nPort disconnected\r");
+        return start_uart_teardown(reactor, sm);
+    } else if result < 0 {
+        panic!("Got error from uart write: {}", result);
+    } else if (result as usize) < buf.len() {
+        let new_buf = buf.split_off(result as usize);
+        let sm2 = Rc::clone(&sm);
+        let id = reactor.submit_write(
+            sm.uart.as_raw_fd(),
+            new_buf,
+            0,
+            Box::new(move |reactor, result, buf, _| uart_write_done(reactor, sm2, result, buf)),
+        );
+        sm.tty_state.set(match sm.tty_state.get() {
+            State::Processing => State::Writing(id),
             e => panic!("uart_write_done in invalid state: {:?}", e),
-        };
-        if result == 0 {
-            println!("\r\nPort disconnected\r");
-            return self.start_teardown();
-        } else if result < 0 {
-            return create_error(&format!("Got error from uart write: {}", result));
-        } else if (result as usize) < buf.len() {
-            self.tty_state = match &self.tty_state {
-                TtyState::Processing => TtyState::Writing,
-                e => panic!("uart_write_done in invalid state: {:?}", e),
-            };
-            let new_buf = buf.split_off(result as usize);
-            return Ok(vec![Action::Write(self.uart_fd, new_buf, 0, UART_WRITE)]);
-        }
-        self.tty_state = match &self.tty_state {
-            TtyState::Processing => TtyState::Reading,
+        });
+        return;
+    }
+    buf.resize(DEFAULT_READ_SIZE, 0);
+    let sm2 = Rc::clone(&sm);
+    let id = reactor.submit_read(
+        STDIN_FILENO,
+        buf,
+        Box::new(move |reactor, result, buf, _| tty_read_done(reactor, sm2, result, buf)),
+    );
+    sm.tty_state.set(match sm.tty_state.get() {
+        State::Processing => State::Reading(id),
+        e => panic!("uart_write_done in invalid state: {:?}", e),
+    });
+}
+
+fn uart_read_done(
+    reactor: &mut dyn ReactorSubmitter,
+    sm: Rc<UartTtySM>,
+    result: i32,
+    buf: Vec<u8>,
+) {
+    sm.uart_state.set(match sm.uart_state.get() {
+        State::Reading(_) => State::Processing,
+        State::TearDown(_) => return,
+        State::TornDown => return,
+        e => panic!("uart_read_done in invalid state: {:?}", e),
+    });
+    if result == 0 {
+        println!("\r\nPort disconnected\r");
+        return start_uart_teardown(reactor, sm);
+    } else if result < 0 {
+        panic!("Got error from uart read: {}", result);
+    }
+    // This is wrapped in a large bufwriter, so writes to the
+    // transcript should be every few seconds at most; such writes
+    // should also be extremely fast on any kind of remotely
+    // modern hw.
+    if let Some(transcript) = &sm.transcript {
+        log_to_transcript(reactor, &transcript, &buf);
+    }
+    let sm2 = Rc::clone(&sm);
+    let id = reactor.submit_write(
+        STDIN_FILENO,
+        buf,
+        0,
+        Box::new(move |reactor, result, buf, _| tty_write_done(reactor, sm2, result, buf)),
+    );
+    sm.uart_state.set(match sm.uart_state.get() {
+        State::Processing => State::Writing(id),
+        e => panic!("uart_read_done in invalid state: {:?}", e),
+    });
+}
+
+fn tty_write_done(
+    reactor: &mut dyn ReactorSubmitter,
+    sm: Rc<UartTtySM>,
+    result: i32,
+    mut buf: Vec<u8>,
+) {
+    sm.uart_state.set(match sm.uart_state.get() {
+        State::Writing(_) => State::Processing,
+        State::TearDown(_) => return,
+        State::TornDown => return,
+        e => panic!("tty_write_done in invalid state: {:?}", e),
+    });
+    if result == 0 {
+        // Impossible; no tty available to write to as it's closed!
+        return start_uart_teardown(reactor, sm);
+    } else if result < 0 {
+        panic!("Got error from tty write: {}", result);
+    } else if (result as usize) < buf.len() {
+        let new_buf = buf.split_off(result as usize);
+        let sm2 = Rc::clone(&sm);
+        let id = reactor.submit_write(
+            STDIN_FILENO,
+            new_buf,
+            0,
+            Box::new(move |reactor, result, buf, _| tty_write_done(reactor, sm2, result, buf)),
+        );
+        sm.uart_state.set(match sm.uart_state.get() {
+            State::Processing => State::Writing(id),
             e => panic!("uart_write_done in invalid state: {:?}", e),
-        };
-        buf.resize(DEFAULT_READ_SIZE, 0);
-        Ok(vec![Action::Read(STDIN_FILENO, buf, TTY_READ)])
+        });
+        return;
     }
+    buf.resize(DEFAULT_READ_SIZE, 0);
+    let sm2 = Rc::clone(&sm);
+    let id = reactor.submit_read(
+        sm.uart.as_raw_fd(),
+        buf,
+        Box::new(move |reactor, result, buf, _| uart_read_done(reactor, sm2, result, buf)),
+    );
+    sm.uart_state.set(match sm.uart_state.get() {
+        State::Processing => State::Reading(id),
+        e => panic!("uart_write_done in invalid state: {:?}", e),
+    });
+}
 
-    fn uart_read_done(&mut self, result: i32, buf: Vec<u8>) -> Result<Vec<Action>> {
-        self.uart_state = match &self.uart_state {
-            UartState::Reading => UartState::Processing,
-            UartState::TearDown => return Ok(vec![]),
-            e => panic!("uart_read_done in invalid state: {:?}", e),
-        };
-        if result == 0 {
-            println!("\r\nPort disconnected\r");
-            return self.start_teardown();
-        } else if result < 0 {
-            return create_error(&format!("Got error from uart read: {}", result));
+fn start_uart_teardown(reactor: &mut dyn ReactorSubmitter, sm: Rc<UartTtySM>) {
+    sm.tty_state.set(match sm.tty_state.get() {
+        State::Processing => State::TornDown,
+        State::Reading(id) => {
+            let new_sm = sm.clone();
+            let cancel_id = reactor.submit_cancel(
+                id,
+                Box::new(move |reactor, result, user_data| {
+                    handle_other_ev(reactor, new_sm, result, user_data)
+                }),
+            );
+            State::TearDown(cancel_id)
         }
-        // This is wrapped in a large bufwriter, so writes to the
-        // transcript should be every few seconds at most; such writes
-        // should also be extremely fast on any kind of remotely
-        // modern hw.
-        if let Some(transcript) = &mut self.transcript {
-            transcript.log(&buf);
+        State::Writing(id) => {
+            let new_sm = sm.clone();
+            let cancel_id = reactor.submit_cancel(
+                id,
+                Box::new(move |reactor, result, user_data| {
+                    handle_other_ev(reactor, new_sm, result, user_data)
+                }),
+            );
+            State::TearDown(cancel_id)
         }
-        self.uart_state = match &self.uart_state {
-            UartState::Processing => UartState::Writing,
-            e => panic!("uart_read_done in invalid state: {:?}", e),
-        };
-        Ok(vec![Action::Write(STDIN_FILENO, buf, 0, TTY_WRITE)])
+        e => panic!("start_uart_teardown in invalid state: {:?}", e),
+    });
+    sm.uart_state.set(match sm.uart_state.get() {
+        State::Processing => State::TornDown,
+        State::Reading(id) => {
+            let new_sm = sm.clone();
+            let cancel_id = reactor.submit_cancel(
+                id,
+                Box::new(move |reactor, result, user_data| {
+                    handle_other_ev(reactor, new_sm, result, user_data)
+                }),
+            );
+            State::TearDown(cancel_id)
+        }
+        State::Writing(id) => {
+            let new_sm = sm.clone();
+            let cancel_id = reactor.submit_cancel(
+                id,
+                Box::new(move |reactor, result, user_data| {
+                    handle_other_ev(reactor, new_sm, result, user_data)
+                }),
+            );
+            State::TearDown(cancel_id)
+        }
+        e => panic!("start_uart_teardown in invalid state: {:?}", e),
+    });
+    if let Some(transcript) = &sm.transcript {
+        start_transcript_teardown(reactor, transcript.clone());
     }
+}
 
-    fn tty_write_done(&mut self, result: i32, mut buf: Vec<u8>) -> Result<Vec<Action>> {
-        self.uart_state = match &self.uart_state {
-            UartState::Writing => UartState::Processing,
-            UartState::TearDown => return Ok(vec![]),
-            e => panic!("tty_write_done in invalid state: {:?}", e),
-        };
-        if result == 0 {
-            // Impossible; no tty available to write to as it's closed!
-            return self.start_teardown();
-        } else if result < 0 {
-            return create_error(&format!("Got error from tty write: {}", result));
-        } else if (result as usize) < buf.len() {
-            self.uart_state = match &self.uart_state {
-                UartState::Processing => UartState::Writing,
-                e => panic!("uart_write_done in invalid state: {:?}", e),
-            };
-            let new_buf = buf.split_off(result as usize);
-            return Ok(vec![Action::Write(STDIN_FILENO, new_buf, 0, TTY_WRITE)]);
-        }
-        self.uart_state = match &self.uart_state {
-            UartState::Processing => UartState::Reading,
-            e => panic!("uart_write_done in invalid state: {:?}", e),
-        };
-        buf.resize(DEFAULT_READ_SIZE, 0);
-        Ok(vec![Action::Read(self.uart_fd, buf, UART_READ)])
-    }
-
-    fn start_teardown(&mut self) -> Result<Vec<Action>> {
-        let mut actions = Vec::new();
-        self.tty_state = match &self.tty_state {
-            TtyState::Processing => TtyState::TearDown,
-            TtyState::Reading => {
-                actions.push(Action::Cancel(TTY_READ, TTY_READ_CANCEL));
-                TtyState::TearDown
-            }
-            TtyState::Writing => {
-                actions.push(Action::Cancel(UART_WRITE, UART_WRITE_CANCEL));
-                TtyState::TearDown
-            }
-            e => panic!("start_teardown in invalid state: {:?}", e),
-        };
-        self.uart_state = match &self.uart_state {
-            UartState::Processing => UartState::TearDown,
-            UartState::Reading => {
-                actions.push(Action::Cancel(UART_READ, UART_READ_CANCEL));
-                UartState::TearDown
-            }
-            UartState::Writing => {
-                actions.push(Action::Cancel(TTY_WRITE, TTY_WRITE_CANCEL));
-                UartState::TearDown
-            }
-            e => panic!("start_teardown in invalid state: {:?}", e),
-        };
-        if let Some(transcript) = &mut self.transcript {
-            if let Some(transcript_action) = transcript.start_teardown() {
-                actions.push(transcript_action);
-            }
-        }
-        Ok(actions)
-    }
+fn handle_other_ev(
+    _reactor: &mut dyn ReactorSubmitter,
+    _: Rc<UartTtySM>,
+    _result: i32,
+    user_data: u64,
+) {
+    // TODO check?
+    match user_data {
+        _ => return,
+    };
+    // panic!("Got unknown user_data in handle_other_ev: {}", user_data)
 }
 
 #[cfg(test)]
 mod tests {
-    use uart_tty::*;
+    use crate::uart_tty::*;
+    use std::collections::HashMap;
 
-    fn check_read(action: &Action, expected_fd: i32, buf_len: usize, expected_user_data: u64) {
+    pub struct TestSubmitter {
+        actions: Vec<Action>,
+        next_id: u64,
+    }
+
+    impl TestSubmitter {
+        fn new(next_id: u64) -> TestSubmitter {
+            TestSubmitter {
+                actions: vec![],
+                next_id: next_id,
+            }
+        }
+
+        #[cfg(test)]
+        pub fn get_actions(&mut self) -> HashMap<u64, Action> {
+            let mut map: HashMap<u64, Action> = HashMap::new();
+            let mut actions = Vec::new();
+            std::mem::swap(&mut self.actions, &mut actions);
+            for action in actions {
+                let user_data = match &action {
+                    Action::Read(_, _, user_data, _) => user_data,
+                    Action::Write(_, _, _, user_data, _) => user_data,
+                    Action::Cancel(_, user_data, _) => user_data,
+                };
+                map.insert(*user_data, action);
+            }
+            map
+        }
+    }
+
+    impl ReactorSubmitter for TestSubmitter {
+        fn submit_read(&mut self, fd: i32, buf: Vec<u8>, callback: RWCallback) -> u64 {
+            let current_id = self.next_id;
+            self.next_id += 1;
+            self.actions
+                .push(Action::Read(fd, buf, current_id, callback));
+            return current_id;
+        }
+
+        fn submit_write(
+            &mut self,
+            fd: i32,
+            buf: Vec<u8>,
+            offset: usize,
+            callback: RWCallback,
+        ) -> u64 {
+            let current_id = self.next_id;
+            self.next_id += 1;
+            self.actions
+                .push(Action::Write(fd, buf, offset, current_id, callback));
+            return current_id;
+        }
+
+        fn submit_cancel(&mut self, id: u64, callback: CancelCallback) -> u64 {
+            let current_id = self.next_id;
+            self.next_id += 1;
+            self.actions.push(Action::Cancel(id, current_id, callback));
+            return current_id;
+        }
+    }
+
+    fn check_read(action: &Action, expected_fd: i32, buf_len: usize) {
         match &action {
-            Action::Read(fd, buf, user_data) => {
+            Action::Read(fd, buf, _, _) => {
                 assert_eq!(*fd, expected_fd);
                 assert_eq!(buf.len(), buf_len);
-                assert_eq!(*user_data, expected_user_data);
             }
-            e => panic!("{:?}", e),
+            _ => panic!("check_read"),
         };
     }
 
-    fn check_cancel(action: &Action, expected_cancel_data: u64, expected_user_data: u64) {
-        match &action {
-            Action::Cancel(cancel_data, user_data) => {
-                assert_eq!(*cancel_data, expected_cancel_data);
-                assert_eq!(*user_data, expected_user_data);
-            }
-            e => panic!("{:?}", e),
-        };
+    // fn check_cancel(action: &Action, expected_cancel_data: u64) {
+    //     match &action {
+    //         Action::Cancel(cancel_data, _user_data, _) => {
+    //             assert_eq!(*cancel_data, expected_cancel_data);
+    //         }
+    //         e => panic!("check_cancel: {:?}", e),
+    //     };
+    // }
+
+    fn reply_action(
+        reactor: &mut dyn ReactorSubmitter,
+        action: Action,
+        result: i32,
+        buf: Vec<u8>,
+        user_data: u64,
+    ) {
+        match action {
+            Action::Read(_, _, _, callback) => callback(reactor, result, buf, user_data),
+            Action::Write(_, _, _, _, callback) => callback(reactor, result, buf, user_data),
+            _ => panic!("reply_action"),
+        }
+    }
+
+    fn reply_cancel(
+        reactor: &mut dyn ReactorSubmitter,
+        action: Action,
+        result: i32,
+        user_data: u64,
+    ) {
+        match action {
+            Action::Cancel(_, _, callback) => callback(reactor, result, user_data),
+            _ => panic!("reply_cancel"),
+        }
+    }
+
+    fn get_reading_id(state: &State) -> u64 {
+        if let State::Reading(id) = state {
+            *id
+        }
+        else {
+            panic!("Wrong state in get_reading_id: {:?}", state);
+        }
+    }
+
+    fn get_writing_id(state: &State) -> u64 {
+        if let State::Writing(id) = state {
+            *id
+        }
+        else {
+            panic!("Wrong state in get_writing_id: {:?}", state);
+        }
+    }
+
+    fn get_teardown_id(state: &State) -> u64 {
+        if let State::TearDown(id) = state {
+            *id
+        }
+        else {
+            panic!("Wrong state in get_teardown_id: {:?}", state);
+        }
     }
 
     #[test]
     fn test_uartttysm() {
-        let mut sm = UartTtySM::new(42, None);
+        let mut reactor = TestSubmitter::new(1);
 
-        // Check init actions
-        let init_actions = sm.init_actions();
-        assert_eq!(init_actions.len(), 2);
-        check_read(&init_actions[0], STDIN_FILENO, DEFAULT_READ_SIZE, TTY_READ);
-        check_read(&init_actions[1], 42, DEFAULT_READ_SIZE, UART_READ);
+        let sm = UartTtySM::init_actions(&mut reactor, Box::new(42), None);
 
-        // First tty read
-        let tty_read_actions = sm.handle_buffer_ev(3, vec![97, 98, 99], TTY_READ).unwrap();
-        assert_eq!(tty_read_actions.len(), 1);
-        check_write(&tty_read_actions[0], 42, 3, 0, UART_WRITE);
+        let mut actions = reactor.get_actions();
+        assert_eq!(actions.len(), 2);
+        {
+            let tty_read = get_reading_id(&sm.tty_state.get());
+            check_read(&actions.get(&tty_read).unwrap(), STDIN_FILENO, DEFAULT_READ_SIZE);
+        }
+        {
+            let uart_read = get_reading_id(&sm.uart_state.get());
+            check_read(&actions.get(&uart_read).unwrap(), 42, DEFAULT_READ_SIZE);
+        }
+        // Now start feeding actions to tty
+        {
+            let tty_read = get_reading_id(&sm.tty_state.get());
+            reply_action(&mut reactor, actions.remove(&tty_read).unwrap(), 3, vec![97, 98, 99], tty_read);
+        }
+        // Should have a new action in the reactor, extract it into actions
+        for (k, v) in reactor.get_actions().drain() {
+            actions.insert(k, v);
+        }
+        assert_eq!(actions.len(), 2);
+        {
+            let tty_write = get_writing_id(&sm.tty_state.get());
+            check_write(&actions.get(&tty_write).unwrap(), 42, 3, 0);
+        }
+        {
+            let tty_write = get_writing_id(&sm.tty_state.get());
+            reply_action(&mut reactor, actions.remove(&tty_write).unwrap(), 3, vec![97, 98, 99], tty_write);
+        }
+        // Should have a new action in the reactor, extract it into actions
+        for (k, v) in reactor.get_actions().drain() {
+            actions.insert(k, v);
+        }
+        assert_eq!(actions.len(), 2);
+        {
+            let tty_read = get_reading_id(&sm.tty_state.get());
+            check_read(&actions.get(&tty_read).unwrap(), STDIN_FILENO, DEFAULT_READ_SIZE);
+        }
 
-        // Write to uart was short
-        let uart_short_write_actions = sm
-            .handle_buffer_ev(1, vec![97, 98, 99], UART_WRITE)
-            .unwrap();
-        assert_eq!(uart_short_write_actions.len(), 1);
-        check_write(&uart_short_write_actions[0], 42, 2, 0, UART_WRITE);
-
-        // Write to uart now ok
-        let tty_ok_write_actions = sm.handle_buffer_ev(2, vec![98, 99], UART_WRITE).unwrap();
-        assert_eq!(tty_ok_write_actions.len(), 1);
-        check_read(
-            &tty_ok_write_actions[0],
-            STDIN_FILENO,
-            DEFAULT_READ_SIZE,
-            TTY_READ,
-        );
-
-        // Now try uart
-        let uart_read_actions = sm.handle_buffer_ev(3, vec![97, 98, 99], UART_READ).unwrap();
-        assert_eq!(uart_read_actions.len(), 1);
-        check_write(&uart_read_actions[0], STDIN_FILENO, 3, 0, TTY_WRITE);
-
-        // Tty write was short
-        let tty_short_write_actions = sm.handle_buffer_ev(1, vec![97, 98, 99], TTY_WRITE).unwrap();
-        assert_eq!(tty_short_write_actions.len(), 1);
-        check_write(&tty_short_write_actions[0], STDIN_FILENO, 2, 0, TTY_WRITE);
-
-        // Tty write now ok
-        let tty_ok_write_actions = sm.handle_buffer_ev(2, vec![98, 99], TTY_WRITE).unwrap();
-        assert_eq!(tty_ok_write_actions.len(), 1);
-        check_read(&tty_ok_write_actions[0], 42, DEFAULT_READ_SIZE, UART_READ);
+        // uart side
+        {
+            let uart_read = get_reading_id(&sm.uart_state.get());
+            reply_action(&mut reactor, actions.remove(&uart_read).unwrap(), 3, vec![97, 98, 99], uart_read);
+        }
+        // Should have a new action in the reactor, extract it into actions
+        for (k, v) in reactor.get_actions().drain() {
+            actions.insert(k, v);
+        }
+        assert_eq!(actions.len(), 2);
+        {
+            let uart_write = get_writing_id(&sm.uart_state.get());
+            check_write(&actions.get(&uart_write).unwrap(), STDIN_FILENO, 3, 0);
+        }
+        {
+            let uart_write = get_writing_id(&sm.uart_state.get());
+            reply_action(&mut reactor, actions.remove(&uart_write).unwrap(), 3, vec![97, 98, 99], uart_write);
+        }
+        // Should have a new action in the reactor, extract it into actions
+        for (k, v) in reactor.get_actions().drain() {
+            actions.insert(k, v);
+        }
+        assert_eq!(actions.len(), 2);
+        {
+            let uart_read = get_reading_id(&sm.uart_state.get());
+            check_read(&actions.get(&uart_read).unwrap(), 42, DEFAULT_READ_SIZE);
+        }
 
         // Tty read to quit
-        let tty_read_actions = sm.handle_buffer_ev(1, vec![15], TTY_READ).unwrap();
-        assert_eq!(tty_read_actions.len(), 1);
-        check_cancel(&tty_read_actions[0], UART_READ, UART_READ_CANCEL);
-
-        let uart_read_cancel_actions = sm.handle_other_ev(-1, UART_READ_CANCEL).unwrap();
-        assert!(uart_read_cancel_actions.is_empty());
+        {
+            let tty_read = get_reading_id(&sm.tty_state.get());
+            reply_action(&mut reactor, actions.remove(&tty_read).unwrap(), 1, vec![15], tty_read);
+        }
+        // Should have a new action in the reactor, extract it into actions
+        for (k, v) in reactor.get_actions().drain() {
+            actions.insert(k, v);
+        }
+        assert_eq!(actions.len(), 2);
+        {
+            let uart_cancel = get_teardown_id(&sm.uart_state.get());
+            reply_cancel(&mut reactor, actions.remove(&uart_cancel).unwrap(), 0, uart_cancel);
+        }
+        // Should have no new actions in the reactor, extract it into actions
+        for (k, v) in reactor.get_actions().drain() {
+            actions.insert(k, v);
+        }
+        assert_eq!(actions.len(), 1);
+        for (k, v) in &actions {
+            println!("{} -> {:?}", k, v);
+        }
+        // {
+        //     let tty_cancel = get_reading_id(&sm.tty_state.get());
+        //     reply_cancel(&mut reactor, actions.remove(&tty_cancel).unwrap(), 0, tty_cancel);
+        // }
+        // // Should have no new actions in the reactor, extract it into actions
+        // for (k, v) in reactor.get_actions().drain() {
+        //     actions.insert(k, v);
+        // }
+        // assert!(actions.is_empty());
     }
 }
 
