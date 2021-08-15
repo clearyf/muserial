@@ -66,6 +66,7 @@ enum State {
 }
 
 pub struct UartTtySM {
+    tty: Box<dyn AsRawFd>,
     uart: Box<dyn AsRawFd>,
     uart_state: Cell<State>,
     tty_state: Cell<State>,
@@ -75,10 +76,12 @@ pub struct UartTtySM {
 impl UartTtySM {
     pub fn init_actions(
         reactor: &mut dyn ReactorSubmitter,
+        tty: Box<dyn AsRawFd>,
         uart: Box<dyn AsRawFd>,
         transcript: Option<Transcript>,
     ) -> Rc<UartTtySM> {
         let sm = Rc::new(UartTtySM {
+            tty: tty,
             uart: uart,
             tty_state: Cell::new(State::Processing),
             uart_state: Cell::new(State::Processing),
@@ -87,7 +90,7 @@ impl UartTtySM {
         let sm_to_return = Rc::clone(&sm);
         let sm2 = Rc::clone(&sm);
         sm2.tty_state.set(State::Reading(reactor.submit_read(
-            STDIN_FILENO,
+            sm2.tty.as_raw_fd(),
             vec![0; DEFAULT_READ_SIZE],
             Box::new(move |reactor, result, buf, _| tty_read_done(reactor, sm, result, buf)),
         )));
@@ -163,7 +166,7 @@ fn uart_write_done(
     buf.resize(DEFAULT_READ_SIZE, 0);
     let sm2 = Rc::clone(&sm);
     let id = reactor.submit_read(
-        STDIN_FILENO,
+        sm2.tty.as_raw_fd(),
         buf,
         Box::new(move |reactor, result, buf, _| tty_read_done(reactor, sm2, result, buf)),
     );
@@ -200,7 +203,7 @@ fn uart_read_done(
     }
     let sm2 = Rc::clone(&sm);
     let id = reactor.submit_write(
-        STDIN_FILENO,
+        sm2.tty.as_raw_fd(),
         buf,
         0,
         Box::new(move |reactor, result, buf, _| tty_write_done(reactor, sm2, result, buf)),
@@ -232,7 +235,7 @@ fn tty_write_done(
         let new_buf = buf.split_off(result as usize);
         let sm2 = Rc::clone(&sm);
         let id = reactor.submit_write(
-            STDIN_FILENO,
+            sm2.tty.as_raw_fd(),
             new_buf,
             0,
             Box::new(move |reactor, result, buf, _| tty_write_done(reactor, sm2, result, buf)),
@@ -471,7 +474,7 @@ mod tests {
         assert_eq!(actions.len(), 2);
         {
             let tty_read = get_reading_id(&sm.tty_state.get());
-            check_read(&actions.get(&tty_read).unwrap(), STDIN_FILENO, DEFAULT_READ_SIZE);
+            check_read(&actions.get(&tty_read).unwrap(), sm2.tty.as_raw_fd(), DEFAULT_READ_SIZE);
         }
         {
             let uart_read = get_reading_id(&sm.uart_state.get());
@@ -502,7 +505,7 @@ mod tests {
         assert_eq!(actions.len(), 2);
         {
             let tty_read = get_reading_id(&sm.tty_state.get());
-            check_read(&actions.get(&tty_read).unwrap(), STDIN_FILENO, DEFAULT_READ_SIZE);
+            check_read(&actions.get(&tty_read).unwrap(), sm2.tty.as_raw_fd(), DEFAULT_READ_SIZE);
         }
 
         // uart side
@@ -517,7 +520,7 @@ mod tests {
         assert_eq!(actions.len(), 2);
         {
             let uart_write = get_writing_id(&sm.uart_state.get());
-            check_write(&actions.get(&uart_write).unwrap(), STDIN_FILENO, 3, 0);
+            check_write(&actions.get(&uart_write).unwrap(), sm2.tty.as_raw_fd(), 3, 0);
         }
         {
             let uart_write = get_writing_id(&sm.uart_state.get());

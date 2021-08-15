@@ -1,6 +1,9 @@
 use std::io::Result;
+use std::os::unix::io::AsRawFd;
 
 use argparse::{ArgumentParser, Store};
+
+use libc::STDIN_FILENO;
 
 mod reactor;
 use crate::reactor::*;
@@ -31,11 +34,22 @@ fn main() {
     }
 }
 
+struct LocalTty {}
+
+impl LocalTty {
+    fn new() -> LocalTty { LocalTty{} }
+}
+
+impl AsRawFd for LocalTty {
+    fn as_raw_fd(&self) -> i32 { STDIN_FILENO }
+}
+
 fn mainloop(dev_name: String) -> Result<()> {
     let mut r = Reactor::new(4)?;
     r.with_submitter(Box::new(move |reactor| {
         UartTtySM::init_actions(
             reactor,
+            Box::new(LocalTty::new()),
             Box::new(UartTty::new(&dev_name)?),
             Some(Transcript::new()?),
         );
