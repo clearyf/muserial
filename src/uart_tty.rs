@@ -326,7 +326,7 @@ fn handle_other_ev(
     // panic!("Got unknown user_data in handle_other_ev: {}", user_data)
 }
 
-#[cfg(test)]
+#[cfg(test_disabled)]
 mod tests {
     use crate::uart_tty::*;
     use std::collections::HashMap;

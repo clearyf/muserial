@@ -1,13 +1,13 @@
 use std::io::{Error, ErrorKind, Result};
 
-#[cfg(test)]
+#[cfg(testDisabled)]
 use crate::reactor::Action;
 
 pub fn create_error<T>(str: &str) -> Result<T> {
     Err(Error::new(ErrorKind::Other, str))
 }
 
-#[cfg(test)]
+#[cfg(testDisabled)]
 pub fn check_write(
     action: &Action,
     expected_fd: i32,
