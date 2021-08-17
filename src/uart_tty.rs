@@ -75,7 +75,7 @@ pub struct UartTtySM {
 
 impl UartTtySM {
     pub fn init_actions(
-        reactor: &mut dyn ReactorSubmitter,
+        reactor: &mut Reactor,
         tty: Box<dyn AsRawFd>,
         uart: Box<dyn AsRawFd>,
         transcript: Option<Transcript>,
@@ -89,13 +89,13 @@ impl UartTtySM {
         });
         let sm_to_return = Rc::clone(&sm);
         let sm2 = Rc::clone(&sm);
-        sm2.tty_state.set(State::Reading(reactor.submit_read(
+        sm2.tty_state.set(State::Reading(reactor.read(
             sm2.tty.as_raw_fd(),
             vec![0; DEFAULT_READ_SIZE],
             Box::new(move |reactor, result, buf, _| tty_read_done(reactor, sm, result, buf)),
         )));
         let sm3 = Rc::clone(&sm2);
-        sm3.uart_state.set(State::Reading(reactor.submit_read(
+        sm3.uart_state.set(State::Reading(reactor.read(
             sm2.uart.as_raw_fd(),
             vec![0; DEFAULT_READ_SIZE],
             Box::new(move |reactor, result, buf, _| uart_read_done(reactor, sm2, result, buf)),
@@ -104,7 +104,7 @@ impl UartTtySM {
     }
 }
 
-fn tty_read_done(reactor: &mut dyn ReactorSubmitter, sm: Rc<UartTtySM>, result: i32, buf: Vec<u8>) {
+fn tty_read_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, buf: Vec<u8>) {
     sm.tty_state.set(match sm.tty_state.get() {
         State::Reading(_) => State::Processing,
         State::TearDown(_) => return,
@@ -118,7 +118,7 @@ fn tty_read_done(reactor: &mut dyn ReactorSubmitter, sm: Rc<UartTtySM>, result: 
         return start_uart_teardown(reactor, sm);
     } else {
         let sm2 = Rc::clone(&sm);
-        let id = reactor.submit_write(
+        let id = reactor.write(
             sm.uart.as_raw_fd(),
             buf,
             0,
@@ -132,7 +132,7 @@ fn tty_read_done(reactor: &mut dyn ReactorSubmitter, sm: Rc<UartTtySM>, result: 
 }
 
 fn uart_write_done(
-    reactor: &mut dyn ReactorSubmitter,
+    reactor: &mut Reactor,
     sm: Rc<UartTtySM>,
     result: i32,
     mut buf: Vec<u8>,
@@ -151,7 +151,7 @@ fn uart_write_done(
     } else if (result as usize) < buf.len() {
         let new_buf = buf.split_off(result as usize);
         let sm2 = Rc::clone(&sm);
-        let id = reactor.submit_write(
+        let id = reactor.write(
             sm.uart.as_raw_fd(),
             new_buf,
             0,
@@ -165,7 +165,7 @@ fn uart_write_done(
     }
     buf.resize(DEFAULT_READ_SIZE, 0);
     let sm2 = Rc::clone(&sm);
-    let id = reactor.submit_read(
+    let id = reactor.read(
         sm2.tty.as_raw_fd(),
         buf,
         Box::new(move |reactor, result, buf, _| tty_read_done(reactor, sm2, result, buf)),
@@ -177,7 +177,7 @@ fn uart_write_done(
 }
 
 fn uart_read_done(
-    reactor: &mut dyn ReactorSubmitter,
+    reactor: &mut Reactor,
     sm: Rc<UartTtySM>,
     result: i32,
     buf: Vec<u8>,
@@ -202,7 +202,7 @@ fn uart_read_done(
         log_to_transcript(reactor, &transcript, &buf);
     }
     let sm2 = Rc::clone(&sm);
-    let id = reactor.submit_write(
+    let id = reactor.write(
         sm2.tty.as_raw_fd(),
         buf,
         0,
@@ -215,7 +215,7 @@ fn uart_read_done(
 }
 
 fn tty_write_done(
-    reactor: &mut dyn ReactorSubmitter,
+    reactor: &mut Reactor,
     sm: Rc<UartTtySM>,
     result: i32,
     mut buf: Vec<u8>,
@@ -234,7 +234,7 @@ fn tty_write_done(
     } else if (result as usize) < buf.len() {
         let new_buf = buf.split_off(result as usize);
         let sm2 = Rc::clone(&sm);
-        let id = reactor.submit_write(
+        let id = reactor.write(
             sm2.tty.as_raw_fd(),
             new_buf,
             0,
@@ -248,7 +248,7 @@ fn tty_write_done(
     }
     buf.resize(DEFAULT_READ_SIZE, 0);
     let sm2 = Rc::clone(&sm);
-    let id = reactor.submit_read(
+    let id = reactor.read(
         sm.uart.as_raw_fd(),
         buf,
         Box::new(move |reactor, result, buf, _| uart_read_done(reactor, sm2, result, buf)),
@@ -259,12 +259,12 @@ fn tty_write_done(
     });
 }
 
-fn start_uart_teardown(reactor: &mut dyn ReactorSubmitter, sm: Rc<UartTtySM>) {
+fn start_uart_teardown(reactor: &mut Reactor, sm: Rc<UartTtySM>) {
     sm.tty_state.set(match sm.tty_state.get() {
         State::Processing => State::TornDown,
         State::Reading(id) => {
             let new_sm = sm.clone();
-            let cancel_id = reactor.submit_cancel(
+            let cancel_id = reactor.cancel(
                 id,
                 Box::new(move |reactor, result, user_data| {
                     handle_other_ev(reactor, new_sm, result, user_data)
@@ -274,7 +274,7 @@ fn start_uart_teardown(reactor: &mut dyn ReactorSubmitter, sm: Rc<UartTtySM>) {
         }
         State::Writing(id) => {
             let new_sm = sm.clone();
-            let cancel_id = reactor.submit_cancel(
+            let cancel_id = reactor.cancel(
                 id,
                 Box::new(move |reactor, result, user_data| {
                     handle_other_ev(reactor, new_sm, result, user_data)
@@ -288,7 +288,7 @@ fn start_uart_teardown(reactor: &mut dyn ReactorSubmitter, sm: Rc<UartTtySM>) {
         State::Processing => State::TornDown,
         State::Reading(id) => {
             let new_sm = sm.clone();
-            let cancel_id = reactor.submit_cancel(
+            let cancel_id = reactor.cancel(
                 id,
                 Box::new(move |reactor, result, user_data| {
                     handle_other_ev(reactor, new_sm, result, user_data)
@@ -298,7 +298,7 @@ fn start_uart_teardown(reactor: &mut dyn ReactorSubmitter, sm: Rc<UartTtySM>) {
         }
         State::Writing(id) => {
             let new_sm = sm.clone();
-            let cancel_id = reactor.submit_cancel(
+            let cancel_id = reactor.cancel(
                 id,
                 Box::new(move |reactor, result, user_data| {
                     handle_other_ev(reactor, new_sm, result, user_data)
@@ -314,7 +314,7 @@ fn start_uart_teardown(reactor: &mut dyn ReactorSubmitter, sm: Rc<UartTtySM>) {
 }
 
 fn handle_other_ev(
-    _reactor: &mut dyn ReactorSubmitter,
+    _reactor: &mut Reactor,
     _: Rc<UartTtySM>,
     _result: i32,
     user_data: u64,
@@ -362,7 +362,7 @@ mod tests {
     }
 
     impl ReactorSubmitter for TestSubmitter {
-        fn submit_read(&mut self, fd: i32, buf: Vec<u8>, callback: RWCallback) -> u64 {
+        fn read(&mut self, fd: i32, buf: Vec<u8>, callback: RWCallback) -> u64 {
             let current_id = self.next_id;
             self.next_id += 1;
             self.actions
@@ -370,7 +370,7 @@ mod tests {
             return current_id;
         }
 
-        fn submit_write(
+        fn write(
             &mut self,
             fd: i32,
             buf: Vec<u8>,
@@ -384,7 +384,7 @@ mod tests {
             return current_id;
         }
 
-        fn submit_cancel(&mut self, id: u64, callback: CancelCallback) -> u64 {
+        fn cancel(&mut self, id: u64, callback: CancelCallback) -> u64 {
             let current_id = self.next_id;
             self.next_id += 1;
             self.actions.push(Action::Cancel(id, current_id, callback));
@@ -412,7 +412,7 @@ mod tests {
     // }
 
     fn reply_action(
-        reactor: &mut dyn ReactorSubmitter,
+        reactor: &mut Reactor,
         action: Action,
         result: i32,
         buf: Vec<u8>,
@@ -426,7 +426,7 @@ mod tests {
     }
 
     fn reply_cancel(
-        reactor: &mut dyn ReactorSubmitter,
+        reactor: &mut Reactor,
         action: Action,
         result: i32,
         user_data: u64,

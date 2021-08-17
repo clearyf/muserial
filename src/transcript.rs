@@ -59,7 +59,7 @@ impl Transcript {
 }
 
 fn handle_buffer_ev(
-    reactor: &mut dyn ReactorSubmitter,
+    reactor: &mut Reactor,
     transcript: Rc<Transcript>,
     result: i32,
     mut buf: Vec<u8>,
@@ -95,7 +95,7 @@ fn handle_buffer_ev(
     transcript.flushing.set(false);
 }
 
-pub fn start_transcript_teardown(reactor: &mut dyn ReactorSubmitter, transcript: Rc<Transcript>) {
+pub fn start_transcript_teardown(reactor: &mut Reactor, transcript: Rc<Transcript>) {
     if transcript.flushing.get() {
         // Nothing to do right now, will continue flushing in the
         // background
@@ -113,7 +113,7 @@ pub fn start_transcript_teardown(reactor: &mut dyn ReactorSubmitter, transcript:
 }
 
 pub fn log_to_transcript(
-    reactor: &mut dyn ReactorSubmitter,
+    reactor: &mut Reactor,
     transcript: &Rc<Transcript>,
     buf: &[u8],
 ) {
@@ -146,8 +146,8 @@ pub fn log_to_transcript(
     write_buf(reactor, transcript.clone(), buf_to_flush)
 }
 
-fn write_buf(reactor: &mut dyn ReactorSubmitter, transcript: Rc<Transcript>, buf: Vec<u8>) {
-    reactor.submit_write(
+fn write_buf(reactor: &mut Reactor, transcript: Rc<Transcript>, buf: Vec<u8>) {
+    reactor.write(
         transcript.file.as_raw_fd(),
         buf,
         transcript.offset.get(),
@@ -180,7 +180,7 @@ impl Drop for Transcript {
 
         // Close the file before compressing it; in normal shutdown
         // the io-uring is already idle at this point, so either
-        // everything has been flushed or it hasn't been flushing.
+        // everything has been flushed
         std::mem::drop(&mut self.file);
 
         // Compress transcript now that the file is closed

@@ -5,14 +5,8 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::io::{ErrorKind, Result};
 
-pub trait ReactorSubmitter {
-    fn submit_read(&mut self, fd: i32, buf: Vec<u8>, callback: RWCallback) -> u64;
-    fn submit_write(&mut self, fd: i32, buf: Vec<u8>, offset: usize, callback: RWCallback) -> u64;
-    fn submit_cancel(&mut self, id: u64, callback: CancelCallback) -> u64;
-}
-
-pub type RWCallback = Box<dyn FnOnce(&mut dyn ReactorSubmitter, i32, Vec<u8>, u64)>;
-pub type CancelCallback = Box<dyn FnOnce(&mut dyn ReactorSubmitter, i32, u64)>;
+pub type RWCallback = Box<dyn FnOnce(&mut Reactor, i32, Vec<u8>, u64)>;
+pub type CancelCallback = Box<dyn FnOnce(&mut Reactor, i32, u64)>;
 
 fn retry_on_eintr<F, R>(mut fun: F) -> Result<R>
 where
@@ -38,9 +32,9 @@ enum OpInProgress {
 
 pub struct Reactor {
     in_progress: HashMap<u64, OpInProgress>,
-    submitter: io_uring::ownedsplit::SubmitterUring,
-    submission: io_uring::ownedsplit::SubmissionUring,
-    completion: io_uring::ownedsplit::CompletionUring,
+    submit: io_uring::ownedsplit::SubmitterUring,
+    sq: io_uring::ownedsplit::SubmissionUring,
+    cq: io_uring::ownedsplit::CompletionUring,
     next_id: u64,
 }
 
@@ -49,9 +43,9 @@ impl Reactor {
         let (submitter, submission, completion) = IoUring::new(size)?.owned_split();
         Ok(Reactor {
             in_progress: HashMap::new(),
-            submitter: submitter,
-            submission: submission,
-            completion: completion,
+            submit: submitter,
+            sq: submission,
+            cq: completion,
             next_id: 1,
         })
     }
@@ -65,12 +59,12 @@ impl Reactor {
 
     pub fn run(&mut self) -> Result<()> {
         while !self.in_progress.is_empty() {
-            self.submission.submission().sync();
-            retry_on_eintr(|| self.submitter.submitter().submit_and_wait(1))?;
-            self.completion.completion().sync();
+            self.sq.submission().sync();
+            retry_on_eintr(|| self.submit.submitter().submit_and_wait(1))?;
+            self.cq.completion().sync();
 
             loop {
-                let next = self.completion.completion().next();
+                let next = self.cq.completion().next();
                 match next {
                     None => break,
                     Some(cqe) => {
@@ -100,17 +94,15 @@ impl Reactor {
         }
         Ok(())
     }
-}
 
-impl ReactorSubmitter for Reactor {
-    fn submit_read(&mut self, fd: i32, mut buf: Vec<u8>, callback: RWCallback) -> u64 {
+    pub fn read(&mut self, fd: i32, mut buf: Vec<u8>, callback: RWCallback) -> u64 {
         let user_data = self.next_id;
         self.next_id += 1;
         let entry = opcode::Read::new(Fd(fd), buf.as_mut_ptr(), buf.len().try_into().unwrap())
             .build()
             .flags(io_uring::squeue::Flags::ASYNC)
             .user_data(user_data);
-        match unsafe { self.submission.submission().push(&entry) } {
+        match unsafe { self.sq.submission().push(&entry) } {
             Ok(_) => (),
             Err(e) => panic!("io-uring push error: {}", e),
         }
@@ -123,7 +115,7 @@ impl ReactorSubmitter for Reactor {
         user_data
     }
 
-    fn submit_write(
+    pub fn write(
         &mut self,
         fd: i32,
         mut buf: Vec<u8>,
@@ -136,7 +128,7 @@ impl ReactorSubmitter for Reactor {
             .build()
             .flags(io_uring::squeue::Flags::ASYNC)
             .user_data(user_data);
-        match unsafe { self.submission.submission().push(&entry) } {
+        match unsafe { self.sq.submission().push(&entry) } {
             Ok(_) => (),
             Err(e) => panic!("io-uring push error: {}", e),
         }
@@ -149,14 +141,14 @@ impl ReactorSubmitter for Reactor {
         user_data
     }
 
-    fn submit_cancel(&mut self, op_to_cancel: u64, callback: CancelCallback) -> u64 {
+    pub fn cancel(&mut self, op_to_cancel: u64, callback: CancelCallback) -> u64 {
         let user_data = self.next_id;
         self.next_id += 1;
         let entry = opcode::AsyncCancel::new(op_to_cancel)
             .build()
             .flags(io_uring::squeue::Flags::ASYNC)
             .user_data(user_data);
-        match unsafe { self.submission.submission().push(&entry) } {
+        match unsafe { self.sq.submission().push(&entry) } {
             Ok(_) => (),
             Err(e) => panic!("io-uring push error: {}", e),
         }
@@ -168,5 +160,4 @@ impl ReactorSubmitter for Reactor {
         }
         user_data
     }
-
 }
