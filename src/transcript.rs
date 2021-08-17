@@ -112,11 +112,7 @@ pub fn start_transcript_teardown(reactor: &mut Reactor, transcript: Rc<Transcrip
     write_buf(reactor, transcript, new_buf)
 }
 
-pub fn log_to_transcript(
-    reactor: &mut Reactor,
-    transcript: &Rc<Transcript>,
-    buf: &[u8],
-) {
+pub fn log_to_transcript(reactor: &mut Reactor, transcript: &Rc<Transcript>, buf: &[u8]) {
     // Calculate new size of the buffer; if it would be larger
     // than the reserved size then copy the current buffer to a
     // new vec, and start flushing the current buffer.  I'm hoping

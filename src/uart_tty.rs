@@ -131,12 +131,7 @@ fn tty_read_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, buf: Vec
     }
 }
 
-fn uart_write_done(
-    reactor: &mut Reactor,
-    sm: Rc<UartTtySM>,
-    result: i32,
-    mut buf: Vec<u8>,
-) {
+fn uart_write_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, mut buf: Vec<u8>) {
     sm.tty_state.set(match sm.tty_state.get() {
         State::Writing(_) => State::Processing,
         State::TearDown(_) => return,
@@ -176,12 +171,7 @@ fn uart_write_done(
     });
 }
 
-fn uart_read_done(
-    reactor: &mut Reactor,
-    sm: Rc<UartTtySM>,
-    result: i32,
-    buf: Vec<u8>,
-) {
+fn uart_read_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, buf: Vec<u8>) {
     sm.uart_state.set(match sm.uart_state.get() {
         State::Reading(_) => State::Processing,
         State::TearDown(_) => return,
@@ -214,12 +204,7 @@ fn uart_read_done(
     });
 }
 
-fn tty_write_done(
-    reactor: &mut Reactor,
-    sm: Rc<UartTtySM>,
-    result: i32,
-    mut buf: Vec<u8>,
-) {
+fn tty_write_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, mut buf: Vec<u8>) {
     sm.uart_state.set(match sm.uart_state.get() {
         State::Writing(_) => State::Processing,
         State::TearDown(_) => return,
@@ -313,12 +298,7 @@ fn start_uart_teardown(reactor: &mut Reactor, sm: Rc<UartTtySM>) {
     }
 }
 
-fn handle_other_ev(
-    _reactor: &mut Reactor,
-    _: Rc<UartTtySM>,
-    _result: i32,
-    user_data: u64,
-) {
+fn handle_other_ev(_reactor: &mut Reactor, _: Rc<UartTtySM>, _result: i32, user_data: u64) {
     // TODO check?
     match user_data {
         _ => return,
@@ -370,13 +350,7 @@ mod tests {
             return current_id;
         }
 
-        fn write(
-            &mut self,
-            fd: i32,
-            buf: Vec<u8>,
-            offset: usize,
-            callback: RWCallback,
-        ) -> u64 {
+        fn write(&mut self, fd: i32, buf: Vec<u8>, offset: usize, callback: RWCallback) -> u64 {
             let current_id = self.next_id;
             self.next_id += 1;
             self.actions
@@ -425,12 +399,7 @@ mod tests {
         }
     }
 
-    fn reply_cancel(
-        reactor: &mut Reactor,
-        action: Action,
-        result: i32,
-        user_data: u64,
-    ) {
+    fn reply_cancel(reactor: &mut Reactor, action: Action, result: i32, user_data: u64) {
         match action {
             Action::Cancel(_, _, callback) => callback(reactor, result, user_data),
             _ => panic!("reply_cancel"),
@@ -440,8 +409,7 @@ mod tests {
     fn get_reading_id(state: &State) -> u64 {
         if let State::Reading(id) = state {
             *id
-        }
-        else {
+        } else {
             panic!("Wrong state in get_reading_id: {:?}", state);
         }
     }
@@ -449,8 +417,7 @@ mod tests {
     fn get_writing_id(state: &State) -> u64 {
         if let State::Writing(id) = state {
             *id
-        }
-        else {
+        } else {
             panic!("Wrong state in get_writing_id: {:?}", state);
         }
     }
@@ -458,8 +425,7 @@ mod tests {
     fn get_teardown_id(state: &State) -> u64 {
         if let State::TearDown(id) = state {
             *id
-        }
-        else {
+        } else {
             panic!("Wrong state in get_teardown_id: {:?}", state);
         }
     }
@@ -474,7 +440,11 @@ mod tests {
         assert_eq!(actions.len(), 2);
         {
             let tty_read = get_reading_id(&sm.tty_state.get());
-            check_read(&actions.get(&tty_read).unwrap(), sm2.tty.as_raw_fd(), DEFAULT_READ_SIZE);
+            check_read(
+                &actions.get(&tty_read).unwrap(),
+                sm2.tty.as_raw_fd(),
+                DEFAULT_READ_SIZE,
+            );
         }
         {
             let uart_read = get_reading_id(&sm.uart_state.get());
@@ -483,7 +453,13 @@ mod tests {
         // Now start feeding actions to tty
         {
             let tty_read = get_reading_id(&sm.tty_state.get());
-            reply_action(&mut reactor, actions.remove(&tty_read).unwrap(), 3, vec![97, 98, 99], tty_read);
+            reply_action(
+                &mut reactor,
+                actions.remove(&tty_read).unwrap(),
+                3,
+                vec![97, 98, 99],
+                tty_read,
+            );
         }
         // Should have a new action in the reactor, extract it into actions
         for (k, v) in reactor.get_actions().drain() {
@@ -496,7 +472,13 @@ mod tests {
         }
         {
             let tty_write = get_writing_id(&sm.tty_state.get());
-            reply_action(&mut reactor, actions.remove(&tty_write).unwrap(), 3, vec![97, 98, 99], tty_write);
+            reply_action(
+                &mut reactor,
+                actions.remove(&tty_write).unwrap(),
+                3,
+                vec![97, 98, 99],
+                tty_write,
+            );
         }
         // Should have a new action in the reactor, extract it into actions
         for (k, v) in reactor.get_actions().drain() {
@@ -505,13 +487,23 @@ mod tests {
         assert_eq!(actions.len(), 2);
         {
             let tty_read = get_reading_id(&sm.tty_state.get());
-            check_read(&actions.get(&tty_read).unwrap(), sm2.tty.as_raw_fd(), DEFAULT_READ_SIZE);
+            check_read(
+                &actions.get(&tty_read).unwrap(),
+                sm2.tty.as_raw_fd(),
+                DEFAULT_READ_SIZE,
+            );
         }
 
         // uart side
         {
             let uart_read = get_reading_id(&sm.uart_state.get());
-            reply_action(&mut reactor, actions.remove(&uart_read).unwrap(), 3, vec![97, 98, 99], uart_read);
+            reply_action(
+                &mut reactor,
+                actions.remove(&uart_read).unwrap(),
+                3,
+                vec![97, 98, 99],
+                uart_read,
+            );
         }
         // Should have a new action in the reactor, extract it into actions
         for (k, v) in reactor.get_actions().drain() {
@@ -520,11 +512,22 @@ mod tests {
         assert_eq!(actions.len(), 2);
         {
             let uart_write = get_writing_id(&sm.uart_state.get());
-            check_write(&actions.get(&uart_write).unwrap(), sm2.tty.as_raw_fd(), 3, 0);
+            check_write(
+                &actions.get(&uart_write).unwrap(),
+                sm2.tty.as_raw_fd(),
+                3,
+                0,
+            );
         }
         {
             let uart_write = get_writing_id(&sm.uart_state.get());
-            reply_action(&mut reactor, actions.remove(&uart_write).unwrap(), 3, vec![97, 98, 99], uart_write);
+            reply_action(
+                &mut reactor,
+                actions.remove(&uart_write).unwrap(),
+                3,
+                vec![97, 98, 99],
+                uart_write,
+            );
         }
         // Should have a new action in the reactor, extract it into actions
         for (k, v) in reactor.get_actions().drain() {
@@ -539,7 +542,13 @@ mod tests {
         // Tty read to quit
         {
             let tty_read = get_reading_id(&sm.tty_state.get());
-            reply_action(&mut reactor, actions.remove(&tty_read).unwrap(), 1, vec![15], tty_read);
+            reply_action(
+                &mut reactor,
+                actions.remove(&tty_read).unwrap(),
+                1,
+                vec![15],
+                tty_read,
+            );
         }
         // Should have a new action in the reactor, extract it into actions
         for (k, v) in reactor.get_actions().drain() {
@@ -548,7 +557,12 @@ mod tests {
         assert_eq!(actions.len(), 2);
         {
             let uart_cancel = get_teardown_id(&sm.uart_state.get());
-            reply_cancel(&mut reactor, actions.remove(&uart_cancel).unwrap(), 0, uart_cancel);
+            reply_cancel(
+                &mut reactor,
+                actions.remove(&uart_cancel).unwrap(),
+                0,
+                uart_cancel,
+            );
         }
         // Should have no new actions in the reactor, extract it into actions
         for (k, v) in reactor.get_actions().drain() {

@@ -37,11 +37,15 @@ fn main() {
 struct LocalTty {}
 
 impl LocalTty {
-    fn new() -> LocalTty { LocalTty{} }
+    fn new() -> LocalTty {
+        LocalTty {}
+    }
 }
 
 impl AsRawFd for LocalTty {
-    fn as_raw_fd(&self) -> i32 { STDIN_FILENO }
+    fn as_raw_fd(&self) -> i32 {
+        STDIN_FILENO
+    }
 }
 
 fn mainloop(dev_name: String) -> Result<()> {

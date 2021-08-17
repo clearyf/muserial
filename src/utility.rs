@@ -8,12 +8,7 @@ pub fn create_error<T>(str: &str) -> Result<T> {
 }
 
 #[cfg(testDisabled)]
-pub fn check_write(
-    action: &Action,
-    expected_fd: i32,
-    buf_len: usize,
-    expected_offset: usize,
-) {
+pub fn check_write(action: &Action, expected_fd: i32, buf_len: usize, expected_offset: usize) {
     match &action {
         Action::Write(fd, buf, offset, _, _) => {
             assert_eq!(*fd, expected_fd);

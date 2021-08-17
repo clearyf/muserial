@@ -8,6 +8,8 @@ use std::io::{ErrorKind, Result};
 pub type RWCallback = Box<dyn FnOnce(&mut Reactor, i32, Vec<u8>, u64)>;
 pub type CancelCallback = Box<dyn FnOnce(&mut Reactor, i32, u64)>;
 
+pub type Op = u64;
+
 fn retry_on_eintr<F, R>(mut fun: F) -> Result<R>
 where
     F: FnMut() -> Result<R>,
@@ -67,35 +69,33 @@ impl Reactor {
                 let next = self.cq.completion().next();
                 match next {
                     None => break,
-                    Some(cqe) => {
-                        match self.in_progress.remove(&cqe.user_data()) {
-                            None => panic!(
-                                "Got user_data in cqe that doesn't exist: {}",
-                                cqe.user_data()
-                            ),
-                            Some(OpInProgress::ReadOp(mut buf, callback)) => {
-                                if cqe.result() >= 0 {
-                                    buf.resize(cqe.result() as usize, 0);
-                                } else {
-                                    buf.clear();
-                                }
-                                callback(self, cqe.result(), buf, cqe.user_data());
+                    Some(cqe) => match self.in_progress.remove(&cqe.user_data()) {
+                        None => panic!(
+                            "Got user_data in cqe that doesn't exist: {}",
+                            cqe.user_data()
+                        ),
+                        Some(OpInProgress::ReadOp(mut buf, callback)) => {
+                            if cqe.result() >= 0 {
+                                buf.resize(cqe.result() as usize, 0);
+                            } else {
+                                buf.clear();
                             }
-                            Some(OpInProgress::WriteOp(buf, callback)) => {
-                                callback(self, cqe.result(), buf, cqe.user_data());
-                            }
-                            Some(OpInProgress::OtherOp(callback)) => {
-                                callback(self, cqe.result(), cqe.user_data());
-                            }
+                            callback(self, cqe.result(), buf, cqe.user_data());
                         }
-                    }
+                        Some(OpInProgress::WriteOp(buf, callback)) => {
+                            callback(self, cqe.result(), buf, cqe.user_data());
+                        }
+                        Some(OpInProgress::OtherOp(callback)) => {
+                            callback(self, cqe.result(), cqe.user_data());
+                        }
+                    },
                 }
-            };
+            }
         }
         Ok(())
     }
 
-    pub fn read(&mut self, fd: i32, mut buf: Vec<u8>, callback: RWCallback) -> u64 {
+    pub fn read(&mut self, fd: i32, mut buf: Vec<u8>, callback: RWCallback) -> Op {
         let user_data = self.next_id;
         self.next_id += 1;
         let entry = opcode::Read::new(Fd(fd), buf.as_mut_ptr(), buf.len().try_into().unwrap())
@@ -115,12 +115,7 @@ impl Reactor {
         user_data
     }
 
-    pub fn write(
-        &mut self,
-        fd: i32,
-        mut buf: Vec<u8>,
-        offset: usize,
-        callback: RWCallback) -> u64 {
+    pub fn write(&mut self, fd: i32, mut buf: Vec<u8>, offset: usize, callback: RWCallback) -> Op {
         let user_data = self.next_id;
         self.next_id += 1;
         let entry = opcode::Write::new(Fd(fd), buf.as_mut_ptr(), buf.len().try_into().unwrap())
@@ -141,7 +136,7 @@ impl Reactor {
         user_data
     }
 
-    pub fn cancel(&mut self, op_to_cancel: u64, callback: CancelCallback) -> u64 {
+    pub fn cancel(&mut self, op_to_cancel: Op, callback: CancelCallback) -> Op {
         let user_data = self.next_id;
         self.next_id += 1;
         let entry = opcode::AsyncCancel::new(op_to_cancel)
