@@ -1,7 +1,4 @@
-// use std::borrow::BorrowMut;
 use std::cell::Cell;
-// use std::cell::RefCell;
-// use std::cell::RefMut;
 use std::rc::Rc;
 
 use std::fs::{File, OpenOptions};
@@ -70,6 +67,8 @@ pub struct UartTtySM {
     uart: Box<dyn AsRawFd>,
     uart_state: Cell<State>,
     tty_state: Cell<State>,
+    // This is an RC as the callbacks needs to hold a reference to the
+    // object too.
     transcript: Option<Rc<Transcript>>,
 }
 
@@ -184,10 +183,6 @@ fn uart_read_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, buf: Ve
     } else if result < 0 {
         panic!("Got error from uart read: {}", result);
     }
-    // This is wrapped in a large bufwriter, so writes to the
-    // transcript should be every few seconds at most; such writes
-    // should also be extremely fast on any kind of remotely
-    // modern hw.
     if let Some(transcript) = &sm.transcript {
         log_to_transcript(reactor, &transcript, &buf);
     }
