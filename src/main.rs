@@ -10,7 +10,8 @@ use crate::reactor::*;
 
 mod uart_tty;
 use crate::uart_tty::UartTty;
-use crate::uart_tty::UartTtySM;
+mod uart_tty_sm;
+use crate::uart_tty_sm::UartTtySM;
 
 mod transcript;
 use crate::transcript::Transcript;
