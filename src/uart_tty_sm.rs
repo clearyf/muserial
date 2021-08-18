@@ -1,14 +1,10 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use std::fs::File;
-use std::io::Result;
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::io::AsRawFd;
 
 use crate::reactor::*;
 use crate::transcript::*;
-
-use libc::*;
 
 const DEFAULT_READ_SIZE: usize = 1024;
 const CONTROL_O: u8 = 0x0f;
@@ -69,7 +65,7 @@ fn tty_read_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, buf: Vec
         State::TearDown(_) => return,
         e => panic!("tty_read_done in invalid state: {:?}", e),
     });
-    if result < 0 {
+    if result <= 0 {
         panic!("Got error from tty read: {}", result);
     }
     if buf.contains(&CONTROL_O) {
@@ -139,8 +135,10 @@ fn uart_read_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, buf: Ve
     if result == 0 {
         println!("\r\nPort disconnected\r");
         return start_uart_teardown(reactor, sm);
-    } else if result < 0 {
-        panic!("Got error from uart read: {}", result);
+    }
+    if result < 0 {
+        println!("\r\nGot error from uart read: {}\r", result);
+        return start_uart_teardown(reactor, sm);
     }
     if let Some(transcript) = &sm.transcript {
         log_to_transcript(reactor, &transcript, &buf);
@@ -248,7 +246,7 @@ fn start_uart_teardown(reactor: &mut Reactor, sm: Rc<UartTtySM>) {
         e => panic!("start_uart_teardown in invalid state: {:?}", e),
     });
     if let Some(transcript) = &sm.transcript {
-        start_transcript_teardown(reactor, transcript.clone());
+        flush_transcript(reactor, transcript.clone());
     }
 }
 
@@ -263,7 +261,14 @@ fn handle_other_ev(_reactor: &mut Reactor, _: Rc<UartTtySM>, _result: i32, user_
 #[cfg(test)]
 mod tests {
     use crate::uart_tty_sm::*;
+    use libc::*;
+    use std::fs::File;
+    use std::io::Result;
     use std::io::{Read, Write};
+    use std::mem::drop;
+    use std::os::unix::io::FromRawFd;
+    use std::thread;
+    use std::thread::JoinHandle;
 
     fn create_socketpair() -> (File, File) {
         let mut sockets = [0; 2];
@@ -274,10 +279,10 @@ mod tests {
         unsafe { (File::from_raw_fd(sockets[0]), File::from_raw_fd(sockets[1])) }
     }
 
-    fn start_reactor() -> (File, File, std::thread::JoinHandle<Result<()>>) {
+    fn start_reactor() -> (File, File, JoinHandle<Result<()>>) {
         let (local, local_test) = create_socketpair();
         let (tty, tty_test) = create_socketpair();
-        let child = std::thread::spawn(move || {
+        let child = thread::spawn(move || {
             let mut reactor = Reactor::new(4).unwrap();
             let _sm = UartTtySM::init_actions(
                 &mut reactor,
@@ -304,7 +309,7 @@ mod tests {
         }
 
         // should be interpreted as tty close on the other side.
-        std::mem::drop(tty);
+        drop(tty);
         child
             .join()
             .expect("Couldn't join reactor thread")
