@@ -51,14 +51,11 @@ impl AsRawFd for LocalTty {
 
 fn mainloop(dev_name: String) -> Result<()> {
     let mut r = Reactor::new(4)?;
-    r.with_submitter(Box::new(move |reactor| {
-        UartTtySM::init_actions(
-            reactor,
-            Box::new(LocalTty::new()),
-            Box::new(UartTty::new(&dev_name)?),
-            Some(Transcript::new()?),
-        );
-        Ok(())
-    }))?;
+    UartTtySM::init_actions(
+        &mut r,
+        Box::new(LocalTty::new()),
+        Box::new(UartTty::new(&dev_name)?),
+        Some(Transcript::new()?),
+    );
     r.run()
 }

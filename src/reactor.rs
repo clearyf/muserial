@@ -51,13 +51,6 @@ impl Reactor {
         })
     }
 
-    pub fn with_submitter(
-        &mut self,
-        mut callback: Box<dyn FnMut(&mut Reactor) -> Result<()>>,
-    ) -> Result<()> {
-        callback(self)
-    }
-
     pub fn run(&mut self) -> Result<()> {
         while !self.in_progress.is_empty() {
             self.sq.submission().sync();
