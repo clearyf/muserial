@@ -283,7 +283,7 @@ mod tests {
         let (local, local_test) = create_socketpair();
         let (tty, tty_test) = create_socketpair();
         let child = thread::spawn(move || {
-            let mut reactor = Reactor::new(4).unwrap();
+            let mut reactor = Reactor::new(1).unwrap();
             let _sm = UartTtySM::init_actions(
                 &mut reactor,
                 Box::new(local_test),

@@ -1,3 +1,4 @@
+use io_uring::squeue::Entry;
 use io_uring::types::Fd;
 use io_uring::{opcode, IoUring};
 use std::collections::HashMap;
@@ -88,61 +89,47 @@ impl Reactor {
     }
 
     pub fn read(&mut self, fd: i32, mut buf: Vec<u8>, callback: RWCallback) -> Op {
-        let user_data = self.next_id;
-        self.next_id += 1;
-        let entry = opcode::Read::new(Fd(fd), buf.as_mut_ptr(), buf.len().try_into().unwrap())
-            .build()
-            .flags(io_uring::squeue::Flags::ASYNC)
-            .user_data(user_data);
-        match unsafe { self.sq.submission().push(&entry) } {
-            Ok(_) => (),
-            Err(e) => panic!("io-uring push error: {}", e),
-        }
-        if let Some(_) = self
-            .in_progress
-            .insert(user_data, OpInProgress::ReadOp(buf, callback))
-        {
-            panic!("user_data {} already registered!", user_data);
-        }
-        user_data
+        self.submit_entry(
+            opcode::Read::new(Fd(fd), buf.as_mut_ptr(), buf.len().try_into().unwrap()).build(),
+            OpInProgress::ReadOp(buf, callback),
+        )
     }
 
     pub fn write(&mut self, fd: i32, mut buf: Vec<u8>, offset: usize, callback: RWCallback) -> Op {
-        let user_data = self.next_id;
-        self.next_id += 1;
-        let entry = opcode::Write::new(Fd(fd), buf.as_mut_ptr(), buf.len().try_into().unwrap())
-            .offset(offset.try_into().unwrap())
-            .build()
-            .flags(io_uring::squeue::Flags::ASYNC)
-            .user_data(user_data);
-        match unsafe { self.sq.submission().push(&entry) } {
-            Ok(_) => (),
-            Err(e) => panic!("io-uring push error: {}", e),
-        }
-        if let Some(_) = self
-            .in_progress
-            .insert(user_data, OpInProgress::WriteOp(buf, callback))
-        {
-            panic!("user_data {} already registered!", user_data);
-        }
-        user_data
+        self.submit_entry(
+            opcode::Write::new(Fd(fd), buf.as_mut_ptr(), buf.len().try_into().unwrap())
+                .offset(offset.try_into().unwrap())
+                .build(),
+            OpInProgress::WriteOp(buf, callback),
+        )
     }
 
     pub fn cancel(&mut self, op_to_cancel: Op, callback: CancelCallback) -> Op {
+        self.submit_entry(
+            opcode::AsyncCancel::new(op_to_cancel).build(),
+            OpInProgress::OtherOp(callback),
+        )
+    }
+
+    fn submit_entry(&mut self, mut entry: Entry, op: OpInProgress) -> Op {
         let user_data = self.next_id;
         self.next_id += 1;
-        let entry = opcode::AsyncCancel::new(op_to_cancel)
-            .build()
+        entry = entry
             .flags(io_uring::squeue::Flags::ASYNC)
             .user_data(user_data);
-        match unsafe { self.sq.submission().push(&entry) } {
-            Ok(_) => (),
-            Err(e) => panic!("io-uring push error: {}", e),
+        loop {
+            let res = unsafe { self.sq.submission().push(&entry) };
+            match res {
+                Ok(_) => break,
+                Err(_) => {
+                    // Queue full, submit and repush
+                    self.sq.submission().sync();
+                    // TODO don't ignore this error
+                    retry_on_eintr(|| self.submit.submitter().submit()).unwrap();
+                }
+            }
         }
-        if let Some(_) = self
-            .in_progress
-            .insert(user_data, OpInProgress::OtherOp(callback))
-        {
+        if let Some(_) = self.in_progress.insert(user_data, op) {
             panic!("user_data {} already registered!", user_data);
         }
         user_data

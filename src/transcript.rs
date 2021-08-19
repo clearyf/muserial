@@ -232,10 +232,8 @@ mod tests {
         let b = Arc::new(Barrier::new(2));
         let b2 = b.clone();
         let child = thread::spawn(move || {
-            let mut reactor = Reactor::new(4).unwrap();
-            let t = Rc::new(
-                Transcript::use_existing_file(write_end, String::new()).unwrap(),
-            );
+            let mut reactor = Reactor::new(1).unwrap();
+            let t = Rc::new(Transcript::use_existing_file(write_end, String::new()).unwrap());
             reactor.read(
                 should_quit.as_raw_fd(),
                 vec![0; 1],
@@ -262,10 +260,8 @@ mod tests {
         let b = Arc::new(Barrier::new(2));
         let b2 = b.clone();
         let child = thread::spawn(move || {
-            let mut reactor = Reactor::new(4).unwrap();
-            let t = Rc::new(
-                Transcript::use_existing_file(write_end, String::new()).unwrap(),
-            );
+            let mut reactor = Reactor::new(1).unwrap();
+            let t = Rc::new(Transcript::use_existing_file(write_end, String::new()).unwrap());
             let t2 = t.clone();
             reactor.read(
                 should_quit.as_raw_fd(),
