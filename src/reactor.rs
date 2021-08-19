@@ -34,32 +34,27 @@ enum OpInProgress {
 
 pub struct Reactor {
     in_progress: HashMap<u64, OpInProgress>,
-    submit: io_uring::ownedsplit::SubmitterUring,
-    sq: io_uring::ownedsplit::SubmissionUring,
-    cq: io_uring::ownedsplit::CompletionUring,
+    ring: io_uring::IoUring,
     next_id: u64,
 }
 
 impl Reactor {
     pub fn new(size: u32) -> Result<Reactor> {
-        let (submitter, submission, completion) = IoUring::new(size)?.owned_split();
         Ok(Reactor {
             in_progress: HashMap::new(),
-            submit: submitter,
-            sq: submission,
-            cq: completion,
+            ring: IoUring::new(size)?,
             next_id: 1,
         })
     }
 
     pub fn run(&mut self) -> Result<()> {
         while !self.in_progress.is_empty() {
-            self.sq.submission().sync();
-            retry_on_eintr(|| self.submit.submitter().submit_and_wait(1))?;
-            self.cq.completion().sync();
+            self.ring.submission().sync();
+            retry_on_eintr(|| self.ring.submitter().submit_and_wait(1))?;
+            self.ring.completion().sync();
 
             loop {
-                let next = self.cq.completion().next();
+                let next = self.ring.completion().next();
                 match next {
                     None => break,
                     Some(cqe) => match self.in_progress.remove(&cqe.user_data()) {
@@ -118,14 +113,14 @@ impl Reactor {
             .flags(io_uring::squeue::Flags::ASYNC)
             .user_data(user_data);
         loop {
-            let res = unsafe { self.sq.submission().push(&entry) };
+            let res = unsafe { self.ring.submission().push(&entry) };
             match res {
                 Ok(_) => break,
                 Err(_) => {
                     // Queue full, submit and repush
-                    self.sq.submission().sync();
+                    self.ring.submission().sync();
                     // TODO don't ignore this error
-                    retry_on_eintr(|| self.submit.submitter().submit()).unwrap();
+                    retry_on_eintr(|| self.ring.submitter().submit()).unwrap();
                 }
             }
         }

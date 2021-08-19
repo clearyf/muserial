@@ -7,5 +7,5 @@ edition = "2018"
 [dependencies]
 libc = "0.2.74"
 argparse = "0.2.2"
-io-uring = { version = "0.5.1", features = ["unstable"] }
+io-uring = { version = "0.5.1", features = [] }
 chrono = "0.4"
