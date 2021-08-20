@@ -2,9 +2,12 @@ use std::fs::{File, OpenOptions};
 use std::io::Result;
 use std::os::unix::io::{AsRawFd, RawFd};
 
-use crate::utility::*;
+use crate::utility::create_error;
 
-use libc::*;
+use libc::{
+    tcflush, tcgetattr, tcsetattr, B115200, CLOCAL, CREAD, CRTSCTS, CS8, IGNPAR, STDIN_FILENO,
+    TCIFLUSH, TCSANOW, VMIN, VTIME,
+};
 
 pub struct UartTty {
     uart_settings: libc::termios,

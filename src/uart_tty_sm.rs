@@ -1,10 +1,9 @@
 use std::cell::Cell;
+use std::os::unix::io::AsRawFd;
 use std::rc::Rc;
 
-use std::os::unix::io::AsRawFd;
-
-use crate::reactor::*;
-use crate::transcript::*;
+use crate::reactor::Reactor;
+use crate::transcript::Transcript;
 
 const DEFAULT_READ_SIZE: usize = 1024;
 const CONTROL_O: u8 = 0x0f;
@@ -258,8 +257,9 @@ fn handle_other_ev(_reactor: &mut Reactor, _: Rc<UartTtySM>, _result: i32, user_
 
 #[cfg(test)]
 mod tests {
-    use crate::uart_tty_sm::*;
-    use libc::*;
+    use crate::reactor::Reactor;
+    use crate::uart_tty_sm::{UartTtySM, CONTROL_O};
+    use libc::{socketpair, AF_UNIX, SOCK_STREAM};
     use std::fs::File;
     use std::io::Result;
     use std::io::{Read, Write};

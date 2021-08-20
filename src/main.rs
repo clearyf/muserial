@@ -6,7 +6,7 @@ use argparse::{ArgumentParser, Store};
 use libc::STDIN_FILENO;
 
 mod reactor;
-use crate::reactor::*;
+use crate::reactor::Reactor;
 
 mod uart_tty;
 use crate::uart_tty::UartTty;

@@ -1,5 +1,4 @@
-use std::cell::Cell;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::env;
 use std::fs::File;
@@ -9,7 +8,7 @@ use std::os::unix::io::AsRawFd;
 use std::process::Command;
 use std::rc::Rc;
 
-use crate::reactor::*;
+use crate::reactor::Reactor;
 
 const TRANSCRIPT_BUFFER_SIZE: usize = 4096;
 
@@ -223,11 +222,13 @@ impl Drop for Impl {
 
 #[cfg(test)]
 mod tests {
-    use crate::transcript::*;
+    use crate::reactor::Reactor;
+    use crate::transcript::Transcript;
     use libc::pipe;
-    use std::io::Read;
-    use std::io::Write;
-    use std::os::unix::io::FromRawFd;
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::Barrier;
     use std::thread;
