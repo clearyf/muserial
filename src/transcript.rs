@@ -13,25 +13,32 @@ use crate::reactor::*;
 
 const TRANSCRIPT_BUFFER_SIZE: usize = 4096;
 
+fn get_transcript() -> Result<(File, String)> {
+    let home_dir = env::var("HOME")
+        .map_err(|e| Error::new(ErrorKind::Other, format!("$HOME not in enviroment: {}", e)))?;
+    let date_string = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let path = format!("{}/Documents/lima-logs/log-{}", home_dir, date_string);
+    let transcript = File::create(&path)?;
+    Ok((transcript, path))
+}
+
+// Use pimpl idiom to hide ref-counting in API
 pub struct Transcript {
-    path: String,
-    file: File,
-    offset: Cell<usize>,
-    current_buf: RefCell<Vec<u8>>,
-    flushing: Cell<bool>,
-    bufs_to_be_flushed: RefCell<VecDeque<Vec<u8>>>,
+    p: Rc<Impl>,
 }
 
 impl Transcript {
     #[cfg(test)]
     fn use_existing_file(file: File, path: String) -> Result<Transcript> {
         Ok(Transcript {
-            file: file,
-            path: path,
-            offset: Cell::new(0),
-            current_buf: RefCell::new(Vec::with_capacity(TRANSCRIPT_BUFFER_SIZE)),
-            flushing: Cell::new(false),
-            bufs_to_be_flushed: RefCell::new(VecDeque::new()),
+            p: Rc::new(Impl {
+                file: file,
+                path: path,
+                offset: Cell::new(0),
+                current_buf: RefCell::new(Vec::with_capacity(TRANSCRIPT_BUFFER_SIZE)),
+                flushing: Cell::new(false),
+                bufs_to_be_flushed: RefCell::new(VecDeque::new()),
+            }),
         })
     }
 
@@ -40,12 +47,14 @@ impl Transcript {
             Ok((file, path)) => {
                 println!("\r\nOpened transcript: {}\r", path);
                 Ok(Transcript {
-                    path: path,
-                    file: file,
-                    offset: Cell::new(0),
-                    current_buf: RefCell::new(Vec::with_capacity(TRANSCRIPT_BUFFER_SIZE)),
-                    flushing: Cell::new(false),
-                    bufs_to_be_flushed: RefCell::new(VecDeque::new()),
+                    p: Rc::new(Impl {
+                        path: path,
+                        file: file,
+                        offset: Cell::new(0),
+                        current_buf: RefCell::new(Vec::with_capacity(TRANSCRIPT_BUFFER_SIZE)),
+                        flushing: Cell::new(false),
+                        bufs_to_be_flushed: RefCell::new(VecDeque::new()),
+                    }),
                 })
             }
             Err(e) => {
@@ -54,107 +63,123 @@ impl Transcript {
             }
         }
     }
+
+    pub fn flush(&self, reactor: &mut Reactor) {
+        self.p.flush(reactor);
+    }
+
+    pub fn log(&self, reactor: &mut Reactor, buf: &[u8]) {
+        self.p.log(reactor, buf);
+    }
 }
 
-fn handle_buffer_ev(
-    reactor: &mut Reactor,
-    transcript: Rc<Transcript>,
-    result: i32,
-    mut buf: Vec<u8>,
-    _user_data: u64,
-) {
-    assert!(transcript.flushing.get());
-    if result == 0 {
-        panic!("Got EOF on write in Transcript::handle_buffer_ev");
+struct Impl {
+    path: String,
+    file: File,
+    offset: Cell<usize>,
+    current_buf: RefCell<Vec<u8>>,
+    flushing: Cell<bool>,
+    bufs_to_be_flushed: RefCell<VecDeque<Vec<u8>>>,
+}
+
+impl Impl {
+    fn log(self: &Rc<Self>, reactor: &mut Reactor, buf: &[u8]) {
+        // Calculate new size of the buffer; if it would be larger
+        // than the reserved size then copy the current buffer to a
+        // new vec, and start flushing the current buffer.  I'm hoping
+        // that normally the buffers being logged are <<< than the
+        // TRANSCRIPT_BUFFER_SIZE, so most buffers flushed should be
+        // fairly close to TRANSCRIPT_BUFFER_SIZE.
+        let new_buf_size = buf.len() + self.current_buf.borrow().len();
+        if new_buf_size < TRANSCRIPT_BUFFER_SIZE {
+            self.current_buf.borrow_mut().extend(buf);
+            return;
+        }
+        let mut buf_to_flush = Vec::with_capacity(TRANSCRIPT_BUFFER_SIZE);
+        swap(&mut *self.current_buf.borrow_mut(), &mut buf_to_flush);
+        if new_buf_size == TRANSCRIPT_BUFFER_SIZE {
+            buf_to_flush.extend(buf);
+        } else {
+            self.current_buf.borrow_mut().extend(buf);
+        }
+        if self.flushing.get() {
+            self.bufs_to_be_flushed.borrow_mut().push_back(buf_to_flush);
+            return;
+        }
+        self.flushing.set(true);
+        self.write_buf(reactor, buf_to_flush)
     }
-    if result < 0 {
-        // WTF can be done?
-        panic!(
-            "Got error on write in Transcript::handle_buffer_ev: {}",
-            result
+
+
+    fn flush(self: &Rc<Self>, reactor: &mut Reactor) {
+        if self.flushing.get() {
+            // Nothing to do right now, will continue flushing in the
+            // background
+            return;
+        }
+        // There must be no queued buffers to be flushed, because
+        // otherwise flushing would be in progress.  But it's ok if
+        // there's data in the current_buf.
+        assert!(self.bufs_to_be_flushed.borrow().is_empty());
+        if self.current_buf.borrow().is_empty() {
+            // Nothing more to do
+            return;
+        }
+        self.flushing.set(true);
+        let mut new_buf = Vec::with_capacity(TRANSCRIPT_BUFFER_SIZE);
+        swap(&mut new_buf, &mut self.current_buf.borrow_mut());
+        self.write_buf(reactor, new_buf)
+    }
+
+    fn handle_buffer_ev(
+        self: Rc<Self>,
+        reactor: &mut Reactor,
+        result: i32,
+        mut buf: Vec<u8>,
+        _user_data: u64,
+    ) {
+        assert!(self.flushing.get());
+        if result == 0 {
+            panic!("Got EOF on write in Transcript::handle_buffer_ev");
+        }
+        if result < 0 {
+            // WTF can be done?
+            panic!(
+                "Got error on write in Transcript::handle_buffer_ev: {}",
+                result
+            );
+        }
+        self.offset.set(self.offset.get() + result as usize);
+        if (result as usize) < buf.len() {
+            // short write
+            let new_buf = buf.split_off(result as usize);
+            self.write_buf(reactor, new_buf);
+            return;
+        }
+        // Queued buffer done, check for next
+        let maybe_next_buf = self.bufs_to_be_flushed.borrow_mut().pop_front();
+        if let Some(next_buf) = maybe_next_buf {
+            self.write_buf(reactor, next_buf);
+            return;
+        }
+        // Nothing more to do for the moment
+        self.flushing.set(false);
+    }
+
+    fn write_buf(self: &Rc<Self>, reactor: &mut Reactor, buf: Vec<u8>) {
+        let p2 = self.clone();
+        reactor.write(
+            self.file.as_raw_fd(),
+            buf,
+            self.offset.get(),
+            Box::new(move |reactor, result, buf, user_data| {
+                p2.handle_buffer_ev(reactor, result, buf, user_data)
+            }),
         );
     }
-    transcript
-        .offset
-        .set(transcript.offset.get() + result as usize);
-    if (result as usize) < buf.len() {
-        // short write
-        let new_buf = buf.split_off(result as usize);
-        write_buf(reactor, transcript, new_buf);
-        return;
-    }
-    // Queued buffer done, check for next
-    let maybe_next_buf = transcript.bufs_to_be_flushed.borrow_mut().pop_front();
-    if let Some(next_buf) = maybe_next_buf {
-        write_buf(reactor, transcript, next_buf);
-        return;
-    }
-    // Nothing more to do for the moment
-    transcript.flushing.set(false);
 }
 
-pub fn flush_transcript(reactor: &mut Reactor, transcript: Rc<Transcript>) {
-    if transcript.flushing.get() {
-        // Nothing to do right now, will continue flushing in the
-        // background
-        return;
-    }
-    // There must be no queued buffers to be flushed, because
-    // otherwise flushing would be in progress.  But it's ok if
-    // there's data in the current_buf.
-    assert!(transcript.bufs_to_be_flushed.borrow().is_empty());
-    if transcript.current_buf.borrow().is_empty() {
-        // Nothing more to do
-        return;
-    }
-    transcript.flushing.set(true);
-    let mut new_buf = Vec::with_capacity(TRANSCRIPT_BUFFER_SIZE);
-    swap(&mut new_buf, &mut transcript.current_buf.borrow_mut());
-    write_buf(reactor, transcript, new_buf)
-}
-
-pub fn log_to_transcript(reactor: &mut Reactor, transcript: &Rc<Transcript>, buf: &[u8]) {
-    // Calculate new size of the buffer; if it would be larger
-    // than the reserved size then copy the current buffer to a
-    // new vec, and start flushing the current buffer.  I'm hoping
-    // that normally the buffers being logged are <<< than the
-    // TRANSCRIPT_BUFFER_SIZE, so most buffers flushed should be
-    // fairly close to TRANSCRIPT_BUFFER_SIZE.
-    let new_buf_size = buf.len() + transcript.current_buf.borrow().len();
-    if new_buf_size < TRANSCRIPT_BUFFER_SIZE {
-        transcript.current_buf.borrow_mut().extend(buf);
-        return;
-    }
-    let mut buf_to_flush = Vec::with_capacity(TRANSCRIPT_BUFFER_SIZE);
-    swap(&mut *transcript.current_buf.borrow_mut(), &mut buf_to_flush);
-    if new_buf_size == TRANSCRIPT_BUFFER_SIZE {
-        buf_to_flush.extend(buf);
-    } else {
-        transcript.current_buf.borrow_mut().extend(buf);
-    }
-    if transcript.flushing.get() {
-        transcript
-            .bufs_to_be_flushed
-            .borrow_mut()
-            .push_back(buf_to_flush);
-        return;
-    }
-    transcript.flushing.set(true);
-    write_buf(reactor, transcript.clone(), buf_to_flush)
-}
-
-fn write_buf(reactor: &mut Reactor, transcript: Rc<Transcript>, buf: Vec<u8>) {
-    reactor.write(
-        transcript.file.as_raw_fd(),
-        buf,
-        transcript.offset.get(),
-        Box::new(move |reactor, result, buf, user_data| {
-            handle_buffer_ev(reactor, transcript, result, buf, user_data)
-        }),
-    );
-}
-
-impl Drop for Transcript {
+impl Drop for Impl {
     fn drop(&mut self) {
         // Flushing should be done at this point, or else it's never
         // going to happen.  This assert should probably be a nop when
@@ -196,15 +221,6 @@ impl Drop for Transcript {
     }
 }
 
-fn get_transcript() -> Result<(File, String)> {
-    let home_dir = env::var("HOME")
-        .map_err(|e| Error::new(ErrorKind::Other, format!("$HOME not in enviroment: {}", e)))?;
-    let date_string = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-    let path = format!("{}/Documents/lima-logs/log-{}", home_dir, date_string);
-    let transcript = File::create(&path)?;
-    Ok((transcript, path))
-}
-
 #[cfg(test)]
 mod tests {
     use crate::transcript::*;
@@ -233,12 +249,12 @@ mod tests {
         let b2 = b.clone();
         let child = thread::spawn(move || {
             let mut reactor = Reactor::new(1).unwrap();
-            let t = Rc::new(Transcript::use_existing_file(write_end, String::new()).unwrap());
+            let t = Transcript::use_existing_file(write_end, String::new()).unwrap();
             reactor.read(
                 should_quit.as_raw_fd(),
                 vec![0; 1],
                 Box::new(move |reactor, _, _, _| {
-                    flush_transcript(reactor, t);
+                    t.flush(reactor);
                 }),
             );
             b2.wait();
@@ -267,10 +283,10 @@ mod tests {
                 should_quit.as_raw_fd(),
                 vec![0; 1],
                 Box::new(move |reactor, _, _, _| {
-                    flush_transcript(reactor, t2);
+                    t2.flush(reactor);
                 }),
             );
-            log_to_transcript(&mut reactor, &t, &TEST_STRING);
+            t.log(&mut reactor, &TEST_STRING);
             b2.wait();
             reactor.run().expect("Reactor run exited with an error");
         });

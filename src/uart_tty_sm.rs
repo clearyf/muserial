@@ -23,9 +23,7 @@ pub struct UartTtySM {
     uart: Box<dyn AsRawFd>,
     uart_state: Cell<State>,
     tty_state: Cell<State>,
-    // This is an RC as the callbacks needs to hold a reference to the
-    // object too.
-    transcript: Option<Rc<Transcript>>,
+    transcript: Option<Transcript>,
 }
 
 impl UartTtySM {
@@ -40,7 +38,7 @@ impl UartTtySM {
             uart: uart,
             tty_state: Cell::new(State::Processing),
             uart_state: Cell::new(State::Processing),
-            transcript: transcript.map(|x| Rc::new(x)),
+            transcript: transcript,
         });
         let sm_to_return = Rc::clone(&sm);
         let sm2 = Rc::clone(&sm);
@@ -141,7 +139,7 @@ fn uart_read_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, buf: Ve
         return start_uart_teardown(reactor, sm);
     }
     if let Some(transcript) = &sm.transcript {
-        log_to_transcript(reactor, &transcript, &buf);
+        transcript.log(reactor, &buf);
     }
     let sm2 = Rc::clone(&sm);
     let id = reactor.write(
@@ -246,7 +244,7 @@ fn start_uart_teardown(reactor: &mut Reactor, sm: Rc<UartTtySM>) {
         e => panic!("start_uart_teardown in invalid state: {:?}", e),
     });
     if let Some(transcript) = &sm.transcript {
-        flush_transcript(reactor, transcript.clone());
+        transcript.flush(reactor);
     }
 }
 
