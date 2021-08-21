@@ -31,7 +31,7 @@ impl UartTtySM {
         tty: Box<dyn AsRawFd>,
         uart: Box<dyn AsRawFd>,
         transcript: Option<Transcript>,
-    ) -> Rc<UartTtySM> {
+    ) {
         let sm = Rc::new(UartTtySM {
             tty: tty,
             uart: uart,
@@ -39,7 +39,6 @@ impl UartTtySM {
             uart_state: Cell::new(State::Processing),
             transcript: transcript,
         });
-        let sm_to_return = Rc::clone(&sm);
         let sm2 = Rc::clone(&sm);
         sm2.tty_state.set(State::Reading(reactor.read(
             sm2.tty.as_raw_fd(),
@@ -52,7 +51,6 @@ impl UartTtySM {
             vec![0; DEFAULT_READ_SIZE],
             Box::new(move |reactor, result, buf, _| uart_read_done(reactor, sm2, result, buf)),
         )));
-        sm_to_return
     }
 }
 
@@ -282,7 +280,7 @@ mod tests {
         let (tty, tty_test) = create_socketpair();
         let child = thread::spawn(move || {
             let mut reactor = Reactor::new(1).unwrap();
-            let _sm = UartTtySM::init_actions(
+            UartTtySM::init_actions(
                 &mut reactor,
                 Box::new(local_test),
                 Box::new(tty_test),
