@@ -83,6 +83,7 @@ impl Reactor {
         Ok(())
     }
 
+    // TODO consider taking ownership of Fd?
     pub fn read(&mut self, fd: i32, mut buf: Vec<u8>, callback: RWCallback) -> Op {
         self.submit_entry(
             opcode::Read::new(Fd(fd), buf.as_mut_ptr(), buf.len().try_into().unwrap()).build(),
