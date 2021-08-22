@@ -61,9 +61,11 @@ fn tty_read_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, buf: Vec
         e => panic!("tty_read_done in invalid state: {:?}", e),
     });
     if result <= 0 {
-        panic!("Got error from tty read: {}", result);
+        println!("\r\nPort disconnected due to error on tty read: {}\r", -result);
+        return start_uart_teardown(reactor, sm);
     }
     if buf.contains(&CONTROL_O) {
+        println!("\r\nQuit requested by user\r");
         return start_uart_teardown(reactor, sm);
     } else {
         let sm2 = Rc::clone(&sm);
@@ -91,7 +93,8 @@ fn uart_write_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, mut bu
         println!("\r\nPort disconnected\r");
         return start_uart_teardown(reactor, sm);
     } else if result < 0 {
-        panic!("Got error from uart write: {}", result);
+        println!("\r\nPort disconnected due to error on uart write: {}\r", -result);
+        return start_uart_teardown(reactor, sm);
     } else if (result as usize) < buf.len() {
         let new_buf = buf.split_off(result as usize);
         let sm2 = Rc::clone(&sm);
@@ -132,7 +135,7 @@ fn uart_read_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, buf: Ve
         return start_uart_teardown(reactor, sm);
     }
     if result < 0 {
-        println!("\r\nGot error from uart read: {}\r", result);
+        println!("\r\nGot error from uart read: {}\r", -result);
         return start_uart_teardown(reactor, sm);
     }
     if let Some(transcript) = &sm.transcript {
@@ -159,10 +162,11 @@ fn tty_write_done(reactor: &mut Reactor, sm: Rc<UartTtySM>, result: i32, mut buf
         e => panic!("tty_write_done in invalid state: {:?}", e),
     });
     if result == 0 {
-        // Impossible; no tty available to write to as it's closed!
+        println!("\r\nGot tty EOF on tty write: {}\r", -result);
         return start_uart_teardown(reactor, sm);
     } else if result < 0 {
-        panic!("Got error from tty write: {}", result);
+        println!("\r\nExiting due to error on tty write: {}\r", -result);
+        return start_uart_teardown(reactor, sm);
     } else if (result as usize) < buf.len() {
         let new_buf = buf.split_off(result as usize);
         let sm2 = Rc::clone(&sm);

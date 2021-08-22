@@ -59,7 +59,7 @@ impl Reactor {
                     None => break,
                     Some(cqe) => match self.in_progress.remove(&cqe.user_data()) {
                         None => panic!(
-                            "Got user_data in cqe that doesn't exist: {}",
+                            "Got user_data in cqe that isn't registered: {}",
                             cqe.user_data()
                         ),
                         Some(OpInProgress::ReadOp(mut buf, callback)) => {
