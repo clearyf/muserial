@@ -21,7 +21,7 @@ path to this repo.
 
 ```
 self: super: {
-  muserial = (super.callPackage /PATH_TO_MUSERIAL_REPO {}).muserial {};
+  muserial = (super.callPackage /PATH_TO_MUSERIAL_REPO {}) {};
 }
 ```
 
