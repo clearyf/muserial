@@ -32,7 +32,6 @@ impl UartTty {
         set_tty_settings(STDIN_FILENO, &update_tty_settings(&tty_settings))?;
 
         let uart_settings = get_tty_settings(dev.as_raw_fd())?;
-        // TODO allow changing of speed
         set_tty_settings(dev.as_raw_fd(), &update_uart_settings(&uart_settings))?;
         Ok(UartTty {
             uart_settings: uart_settings,

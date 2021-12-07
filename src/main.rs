@@ -1,4 +1,4 @@
-use std::io::Result;
+use std::io;
 
 extern crate libc;
 use libc::*;
@@ -38,7 +38,7 @@ fn main() {
 const STDIN_ID: Token = Token(0);
 const UART_ID: Token = Token(1);
 
-fn mainloop(dev_name: &str) -> Result<()> {
+fn mainloop(dev_name: &str) -> Result<(), io::Error> {
     let mut uart = UartTty::new(dev_name)?;
     let mut poll = Poll::new()?;
 
