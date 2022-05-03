@@ -31,7 +31,7 @@ fn main() {
 
     match mainloop(&dev_name) {
         Ok(()) => println!("\nExiting on request"),
-        Err(why) => println!("\nError: {}", why),
+        Err(why) => println!("\nExiting due to error: {}", why),
     }
 }
 
@@ -54,7 +54,11 @@ fn mainloop(dev_name: &str) -> Result<(), io::Error> {
     )?;
     let mut events = Events::with_capacity(2);
     loop {
-        poll.poll(&mut events, None)?;
+        match poll.poll(&mut events, None) {
+            Ok(_) => (),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
 
         for event in &events {
             if event.token() == STDIN_ID {
