@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Fionn Cleary <fionn.cleary@streamunlimited.com>"]
 
 [dependencies]
-libc = "0.2.74"
-argparse = "0.2.2"
-mio = { version = "0.7.13", features = ["os-poll", "os-ext"] }
+chrono = "0.4"
+libc = "0.2"
+argparse = "0.2"
+mio = { version = "0.7", features = ["os-poll", "os-ext"] }

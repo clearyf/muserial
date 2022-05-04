@@ -1,27 +1,25 @@
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::{stdin, Result};
-use std::os::unix::io::{RawFd, AsRawFd, IntoRawFd, FromRawFd};
 use std::io::prelude::{Read, Write};
+use std::io::{stdin, Result};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 use utility::create_error;
 
 extern crate libc;
 use libc::*;
 
-const BUFFER_SIZE: usize = 1024;
+const BUFFER_SIZE: usize = 64;
 
 pub struct UartTty {
     uart_settings: libc::termios,
     tty_settings: libc::termios,
     uart_dev: fs::File,
-    buffer: [u8; BUFFER_SIZE],
 }
 
-#[derive(Clone, Copy)]
 pub enum Action {
-    AllOk,
+    AllOk(Vec<u8>),
     Quit,
 }
 
@@ -33,38 +31,56 @@ impl UartTty {
 
         let uart_settings = get_tty_settings(dev.as_raw_fd())?;
         set_tty_settings(dev.as_raw_fd(), &update_uart_settings(&uart_settings))?;
+
+        unsafe {
+            fcntl(dev.as_raw_fd(), F_SETFL, O_NONBLOCK);
+            fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
+        }
+
         Ok(UartTty {
             uart_settings: uart_settings,
             tty_settings: tty_settings,
             uart_dev: dev,
-            buffer: [0; BUFFER_SIZE],
         })
     }
 
-    pub fn copy_tty_to_uart(&mut self) -> Result<Action> {
-        let read_size = stdin().read(&mut self.buffer)?;
+    pub fn read_from_tty(&mut self) -> Result<Action> {
+        let mut buf = vec![0; BUFFER_SIZE];
+        let read_size = stdin().read(&mut buf)?;
         if read_size == 0 {
             return create_error("No more data to read, port probably disconnected");
         }
-        let buf = &self.buffer[0..read_size];
+        buf.truncate(read_size);
 
         let control_o: u8 = 0x0f;
         if buf.contains(&control_o) {
             Ok(Action::Quit)
         } else {
-            self.uart_dev.write_all(&buf)?;
-            Ok(Action::AllOk)
+            Ok(Action::AllOk(buf))
         }
     }
 
-    pub fn copy_uart_to_tty(&mut self) -> Result<Action> {
-        let read_size = self.uart_dev.read(&mut self.buffer)?;
+    pub fn read_from_uart(&mut self) -> Result<Vec<u8>> {
+        let mut buf = vec![0; BUFFER_SIZE];
+        let read_size = self.uart_dev.read(&mut buf)?;
         if read_size == 0 {
             return create_error("No more data to read, port probably disconnected");
         }
-        let buf = &self.buffer[0..read_size];
-        write_to_tty(&buf)?;
-        Ok(Action::AllOk)
+        buf.truncate(read_size);
+        Ok(buf)
+    }
+
+    pub fn write_to_tty(&mut self, buf: &[u8]) -> Result<usize> {
+        // If this song & dance isn't done then the output is line-buffered.
+        let mut stdout = unsafe { File::from_raw_fd(STDIN_FILENO) };
+        let res = stdout.write(&buf);
+        // otherwise std::fs::File closes the fd.
+        stdout.into_raw_fd();
+        res
+    }
+
+    pub fn write_to_uart(&mut self, buf: &[u8]) -> Result<usize> {
+        self.uart_dev.write(&buf)
     }
 
     pub fn uart_fd(&self) -> RawFd {
@@ -133,13 +149,4 @@ fn new_termios() -> libc::termios {
         c_ispeed: 0,
         c_ospeed: 0,
     }
-}
-
-fn write_to_tty(buf: &[u8]) -> Result<()> {
-    // If this song & dance isn't done then the output is line-buffered.
-    let mut stdout = unsafe { File::from_raw_fd(STDIN_FILENO) };
-    stdout.write_all(&buf)?;
-    // otherwise std::fs::File closes the fd.
-    stdout.into_raw_fd();
-    Ok(())
 }
