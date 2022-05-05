@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
-use std::io::Write;
+use std::io::{BufWriter, Write};
+use std::mem::drop;
+use std::process::Command;
 
 extern crate libc;
 use libc::*;
@@ -81,12 +83,41 @@ fn get_poll_results(events: &Events) -> PollResults {
     results
 }
 
-fn create_logfile() -> Result<File, io::Error> {
-    File::create(
-        Local::now()
+struct Logfile {
+    handle: BufWriter<File>,
+    path: String,
+}
+
+impl Logfile {
+    fn new() -> Result<Logfile, io::Error> {
+        let path = Local::now()
             .format("/home/fionn/Documents/lima-logs/log-%Y-%m-%d_%H:%M:%S")
-            .to_string(),
-    )
+            .to_string();
+        Ok(Logfile {
+            handle: BufWriter::new(File::create(&path)?),
+            path: path,
+        })
+    }
+
+    fn log(&mut self, buf: &[u8]) -> Result<(), io::Error> {
+        self.handle.write_all(&buf)
+    }
+}
+
+impl Drop for Logfile {
+    fn drop(&mut self) {
+        drop(&mut self.handle);
+        match Command::new("xz").arg(&self.path).status() {
+            Ok(status) => {
+                if !status.success() {
+                    eprintln!("Got {} on running xz on {}", status, self.path);
+                }
+            }
+            Err(e) => {
+                eprintln!("Got an error {} trying to run xz on {}", e, self.path);
+            }
+        }
+    }
 }
 
 fn maybe_write_to<T: FnMut(&[u8]) -> Result<usize, io::Error>>(
@@ -141,6 +172,8 @@ fn maybe_write_to<T: FnMut(&[u8]) -> Result<usize, io::Error>>(
 // to second part.
 fn mainloop(dev_name: &str) -> Result<(), io::Error> {
     // Part 1
+    let mut logfile = Logfile::new()?;
+
     let mut uart = UartTty::new(dev_name)?;
     let mut poll = Poll::new()?;
 
@@ -162,8 +195,6 @@ fn mainloop(dev_name: &str) -> Result<(), io::Error> {
     let mut cur_buf_written_to_tty = 0;
     let mut cur_buf_written_to_uart = 0;
 
-    let mut logfile = create_logfile()?;
-
     loop {
         // Part 2
         let mut events = Events::with_capacity(2);
@@ -183,7 +214,7 @@ fn mainloop(dev_name: &str) -> Result<(), io::Error> {
         }
         if results.uart_readable {
             let buf = uart.read_from_uart()?;
-            logfile.write_all(&buf)?;
+            logfile.log(&buf)?;
             bufs_to_write_tty.push_back(buf);
         }
 
