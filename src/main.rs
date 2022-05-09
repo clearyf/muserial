@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::io::{BufWriter, Write};
-use std::mem::drop;
 use std::process::Command;
 
 extern crate libc;
@@ -96,23 +95,25 @@ struct Logfile {
 
 impl Logfile {
     fn new() -> Result<Logfile, io::Error> {
-        let path = Local::now()
+        let p = Local::now()
             .format("/home/fionn/Documents/lima-logs/log-%Y-%m-%d_%H:%M:%S")
             .to_string();
         Ok(Logfile {
-            handle: BufWriter::new(File::create(&path)?),
-            path: path,
+            handle: BufWriter::new(File::create(&p)?),
+            path: p,
         })
     }
 
     fn log(&mut self, buf: &[u8]) -> Result<(), io::Error> {
-        self.handle.write_all(&buf)
+        self.handle.write_all(buf)
     }
 }
 
 impl Drop for Logfile {
     fn drop(&mut self) {
-        drop(&mut self.handle);
+        if let Err(e) = self.handle.flush() {
+            eprintln!("Got {} when trying to flush logfile {}", e, self.path);
+        }
         match Command::new("xz").arg(&self.path).status() {
             Ok(status) => {
                 if !status.success() {

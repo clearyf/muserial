@@ -11,8 +11,8 @@ extern crate libc;
 use libc::*;
 
 pub struct UartTty {
-    uart_settings: libc::termios,
-    tty_settings: libc::termios,
+    previous_uart_settings: libc::termios,
+    previous_tty_settings: libc::termios,
     uart_dev: fs::File,
 }
 
@@ -36,8 +36,8 @@ impl UartTty {
         }
 
         Ok(UartTty {
-            uart_settings: uart_settings,
-            tty_settings: tty_settings,
+            previous_uart_settings: uart_settings,
+            previous_tty_settings: tty_settings,
             uart_dev: dev,
         })
     }
@@ -69,14 +69,14 @@ impl UartTty {
     pub fn write_to_tty(&mut self, buf: &[u8]) -> Result<usize> {
         // If this song & dance isn't done then the output is line-buffered.
         let mut stdout = unsafe { File::from_raw_fd(STDIN_FILENO) };
-        let res = stdout.write(&buf);
+        let res = stdout.write(buf);
         // otherwise std::fs::File closes the fd.
         stdout.into_raw_fd();
         res
     }
 
     pub fn write_to_uart(&mut self, buf: &[u8]) -> Result<usize> {
-        self.uart_dev.write(&buf)
+        self.uart_dev.write(buf)
     }
 
     pub fn uart_fd(&self) -> RawFd {
@@ -86,14 +86,12 @@ impl UartTty {
 
 impl Drop for UartTty {
     fn drop(&mut self) {
-        match set_tty_settings(STDIN_FILENO, &self.tty_settings) {
-            Err(e) => println!("Couldn't restore tty settings: {}", e),
-            _ => (),
-        };
-        match set_tty_settings(self.uart_dev.as_raw_fd(), &self.uart_settings) {
-            Err(e) => println!("Couldn't restore uart settings: {}", e),
-            _ => (),
-        };
+        if let Err(e) = set_tty_settings(STDIN_FILENO, &self.previous_tty_settings) {
+            println!("Couldn't restore tty settings: {}", e);
+        }
+        if let Err(e) = set_tty_settings(self.uart_dev.as_raw_fd(), &self.previous_uart_settings) {
+            println!("Couldn't restore uart settings: {}", e);
+        }
     }
 }
 
