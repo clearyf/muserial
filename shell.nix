@@ -5,5 +5,6 @@ pkgs.mkShell {
   buildInputs = [
     pkgs.cargo
     pkgs.rustfmt
+    pkgs.clippy
   ];
 }
