@@ -23,6 +23,15 @@ use uart_tty::{Action, UartTty};
 
 mod utility;
 
+// Shrink the buffer queues to this size if they ever grow larger.
+const BUF_QUEUE_SIZE: usize = 4;
+
+// The size of the buffers in the queue.
+const MAX_BUF_SIZE: usize = 4096;
+
+// The read buffer is this size, but the same buffer is always reused.
+const BUFFER_SIZE: usize = 4096;
+
 // The actual interesting code is in the mainloop function
 fn main() {
     let mut dev_name = "/dev/ttyUSB0".to_string();
@@ -43,9 +52,6 @@ fn main() {
 
 const STDIN_ID: Token = Token(0);
 const UART_ID: Token = Token(1);
-
-// Shrink the buffer queues to this size if they ever grow larger.
-const BUF_QUEUE_SIZE: usize = 16;
 
 struct PollResults {
     uart_readable: bool,
@@ -120,40 +126,82 @@ impl Drop for Logfile {
     }
 }
 
-fn maybe_write_to<T: FnMut(&[u8]) -> Result<usize, io::Error>>(
-    flag: bool,
+fn flush_queue<T: FnMut(&[u8]) -> Result<usize, io::Error>>(
     queue: &mut VecDeque<Vec<u8>>,
     written_so_far: &mut usize,
     mut write_func: T,
 ) -> Result<(), io::Error> {
-    if flag || queue.len() == 1 {
-        loop {
-            match queue.front() {
-                None => return Ok(()),
-                Some(buf) => {
-                    // Get slice to remaining bytes to write
-                    let buf = buf.get(*written_so_far..).unwrap();
-                    match write_func(buf) {
-                        Ok(written) => {
-                            if written == buf.len() {
-                                queue.pop_front();
-                                *written_so_far = 0;
-                            } else {
-                                *written_so_far += written;
-                                // partial write, no point in looping
-                                return Ok(());
-                            }
+    loop {
+        match queue.front() {
+            None => return Ok(()),
+            Some(buf) => {
+                // Get slice to remaining bytes to write
+                let buf = buf.get(*written_so_far..).unwrap();
+                match write_func(buf) {
+                    Ok(written) => {
+                        if written == buf.len() {
+                            queue.pop_front();
+                            *written_so_far = 0;
+                        } else {
+                            *written_so_far += written;
+                            // partial write, no point in looping
+                            // anymore as this should only happen
+                            // if there wasn't enough room in the
+                            // receving buffer.
+                            return Ok(());
                         }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-                        Err(e) => return Err(e),
-                    };
-                }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                    Err(e) => return Err(e),
+                };
             }
         }
     }
-    Ok(())
 }
 
+fn enqueue_buf(buf: &[u8], queue: &mut VecDeque<Vec<u8>>) {
+    match queue.front_mut() {
+        None => queue.push_back(buf.to_vec()),
+        Some(front_buf) if front_buf.len() + buf.len() < MAX_BUF_SIZE => front_buf.extend(buf),
+        Some(_) => queue.push_back(buf.to_vec()),
+    };
+}
+
+fn try_write_or_enqueue<T: FnMut(&[u8]) -> Result<usize, io::Error>>(
+    buf: &[u8],
+    queue: &mut VecDeque<Vec<u8>>,
+    mut write_func: T,
+) -> Result<(), io::Error> {
+    if !queue.is_empty() {
+        enqueue_buf(buf, queue);
+        return Ok(());
+    }
+
+    match write_func(buf) {
+        Ok(written) if written == buf.len() => Ok(()),
+        Ok(written) => {
+            // Partial write
+            enqueue_buf(&buf[written..], queue);
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            // Try again later
+            enqueue_buf(buf, queue);
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+// This is quite different to how I have structured this in the past.
+// Previously the poll loop waited for the file descriptors to become
+// ready, read from them and then wrote that data synchronously.  The
+// problem here was that sometimes I would "stop" the terminal, either
+// using Ctrl-s/Ctrl-q or by running inside screen and using the
+// "copy" function.  So now this works by never blocking, and instead
+// if data cannot be written then it queues it here, until the data
+// can be written again.
+//
 // There are 5 parts in mainloop.
 //
 // First part is creation of Uart object (does uart & tty setup), poll
@@ -162,8 +210,9 @@ fn maybe_write_to<T: FnMut(&[u8]) -> Result<usize, io::Error>>(
 // Second part is first part of actual loop; poll is called and
 // results processed.
 //
-// Third part is read from ready file descriptors, data is buffered in
-// queues.
+// Third part is read from ready file descriptors, attempt to write
+// immediately if no data is currently waiting to send, otherwise
+// buffer in the queues.
 //
 // Fourth part is write as much as possible to any writable file
 // descriptors; note that all file descriptors are set non-blocking.
@@ -195,6 +244,7 @@ fn mainloop(dev_name: &str) -> Result<(), io::Error> {
     let mut cur_buf_written_to_tty = 0;
     let mut cur_buf_written_to_uart = 0;
 
+    let mut buf = vec![0; BUFFER_SIZE];
     loop {
         // Part 2
         let mut events = Events::with_capacity(2);
@@ -207,30 +257,32 @@ fn mainloop(dev_name: &str) -> Result<(), io::Error> {
 
         // Part 3
         if results.tty_readable {
-            match uart.read_from_tty()? {
-                Action::AllOk(buf) => bufs_to_write_uart.push_back(buf),
+            buf.resize(BUFFER_SIZE, 0);
+            match uart.read_from_tty(&mut buf)? {
+                Action::AllOk => {
+                    try_write_or_enqueue(&buf, &mut bufs_to_write_uart, |b| uart.write_to_uart(b))?
+                }
                 Action::Quit => return Ok(()),
-            }
+            };
         }
         if results.uart_readable {
-            let buf = uart.read_from_uart()?;
+            buf.resize(BUFFER_SIZE, 0);
+            uart.read_from_uart(&mut buf)?;
             logfile.log(&buf)?;
-            bufs_to_write_tty.push_back(buf);
+            try_write_or_enqueue(&buf, &mut bufs_to_write_tty, |b| uart.write_to_tty(b))?;
         }
 
         // Part 4
-        maybe_write_to(
-            results.tty_writable,
-            &mut bufs_to_write_tty,
-            &mut cur_buf_written_to_tty,
-            |buf| uart.write_to_tty(buf),
-        )?;
-        maybe_write_to(
-            results.uart_writable,
-            &mut bufs_to_write_uart,
-            &mut cur_buf_written_to_uart,
-            |buf| uart.write_to_uart(buf),
-        )?;
+        if results.tty_writable {
+            flush_queue(&mut bufs_to_write_tty, &mut cur_buf_written_to_tty, |b| {
+                uart.write_to_tty(b)
+            })?;
+        }
+        if results.uart_writable {
+            flush_queue(&mut bufs_to_write_uart, &mut cur_buf_written_to_uart, |b| {
+                uart.write_to_uart(b)
+            })?;
+        }
         bufs_to_write_uart.shrink_to(BUF_QUEUE_SIZE);
         bufs_to_write_tty.shrink_to(BUF_QUEUE_SIZE);
 

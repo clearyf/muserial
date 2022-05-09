@@ -10,8 +10,6 @@ use utility::create_error;
 extern crate libc;
 use libc::*;
 
-const BUFFER_SIZE: usize = 64;
-
 pub struct UartTty {
     uart_settings: libc::termios,
     tty_settings: libc::termios,
@@ -19,7 +17,7 @@ pub struct UartTty {
 }
 
 pub enum Action {
-    AllOk(Vec<u8>),
+    AllOk,
     Quit,
 }
 
@@ -44,30 +42,28 @@ impl UartTty {
         })
     }
 
-    pub fn read_from_tty(&mut self) -> Result<Action> {
-        let mut buf = vec![0; BUFFER_SIZE];
-        let read_size = stdin().read(&mut buf)?;
+    pub fn read_from_tty(&mut self, buf: &mut Vec<u8>) -> Result<Action> {
+        let read_size = stdin().read(buf)?;
         if read_size == 0 {
             return create_error("No more data to read, port probably disconnected");
         }
-        buf.truncate(read_size);
 
+        buf.truncate(read_size);
         let control_o: u8 = 0x0f;
         if buf.contains(&control_o) {
             Ok(Action::Quit)
         } else {
-            Ok(Action::AllOk(buf))
+            Ok(Action::AllOk)
         }
     }
 
-    pub fn read_from_uart(&mut self) -> Result<Vec<u8>> {
-        let mut buf = vec![0; BUFFER_SIZE];
-        let read_size = self.uart_dev.read(&mut buf)?;
+    pub fn read_from_uart(&mut self, buf: &mut Vec<u8>) -> Result<()> {
+        let read_size = self.uart_dev.read(buf)?;
         if read_size == 0 {
             return create_error("No more data to read, port probably disconnected");
         }
         buf.truncate(read_size);
-        Ok(buf)
+        Ok(())
     }
 
     pub fn write_to_tty(&mut self, buf: &[u8]) -> Result<usize> {
