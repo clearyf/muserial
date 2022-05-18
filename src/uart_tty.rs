@@ -1,8 +1,9 @@
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io;
 use std::io::prelude::{Read, Write};
-use std::io::{stdin, Result};
+use std::io::stdin;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 use utility::create_error;
@@ -16,13 +17,49 @@ pub struct UartTty {
     uart_dev: fs::File,
 }
 
-pub enum Action {
-    AllOk,
-    Quit,
+pub struct Uart<'a> {
+    uart: &'a mut UartTty,
+}
+
+impl<'a> Write for Uart<'a> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
+        self.uart.uart_dev.write(buf)
+    }
+    fn flush(&mut self) -> Result<(), io::Error> {
+        Ok(())
+    }
+}
+
+impl<'a> Read for Uart<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
+        self.uart.uart_dev.read(buf)
+    }
+}
+
+pub struct Tty {}
+
+impl Write for Tty {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
+        // If this song & dance isn't done then the output is line-buffered.
+        let mut stdout = unsafe { File::from_raw_fd(STDIN_FILENO) };
+        let res = stdout.write(buf);
+        // otherwise std::fs::File closes the fd.
+        stdout.into_raw_fd();
+        res
+    }
+    fn flush(&mut self) -> Result<(), io::Error> {
+        Ok(())
+    }
+}
+
+impl Read for Tty {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
+        stdin().read(buf)
+    }
 }
 
 impl UartTty {
-    pub fn new(dev_name: &str) -> Result<UartTty> {
+    pub fn new(dev_name: &str) -> Result<UartTty, io::Error> {
         let dev = OpenOptions::new().read(true).write(true).open(dev_name)?;
         let tty_settings = get_tty_settings(STDIN_FILENO)?;
         set_tty_settings(STDIN_FILENO, &update_tty_settings(&tty_settings))?;
@@ -42,41 +79,12 @@ impl UartTty {
         })
     }
 
-    pub fn read_from_tty(&mut self, buf: &mut Vec<u8>) -> Result<Action> {
-        let read_size = stdin().read(buf)?;
-        if read_size == 0 {
-            return create_error("No more data to read, port probably disconnected");
-        }
-
-        buf.truncate(read_size);
-        let control_o: u8 = 0x0f;
-        if buf.contains(&control_o) {
-            Ok(Action::Quit)
-        } else {
-            Ok(Action::AllOk)
-        }
+    pub fn uart(&mut self) -> Uart {
+        Uart { uart: self }
     }
 
-    pub fn read_from_uart(&mut self, buf: &mut Vec<u8>) -> Result<()> {
-        let read_size = self.uart_dev.read(buf)?;
-        if read_size == 0 {
-            return create_error("No more data to read, port probably disconnected");
-        }
-        buf.truncate(read_size);
-        Ok(())
-    }
-
-    pub fn write_to_tty(&mut self, buf: &[u8]) -> Result<usize> {
-        // If this song & dance isn't done then the output is line-buffered.
-        let mut stdout = unsafe { File::from_raw_fd(STDIN_FILENO) };
-        let res = stdout.write(buf);
-        // otherwise std::fs::File closes the fd.
-        stdout.into_raw_fd();
-        res
-    }
-
-    pub fn write_to_uart(&mut self, buf: &[u8]) -> Result<usize> {
-        self.uart_dev.write(buf)
+    pub fn tty(&mut self) -> Tty {
+        Tty {}
     }
 
     pub fn uart_fd(&self) -> RawFd {
@@ -95,7 +103,7 @@ impl Drop for UartTty {
     }
 }
 
-fn get_tty_settings(fd: RawFd) -> Result<libc::termios> {
+fn get_tty_settings(fd: RawFd) -> Result<libc::termios, io::Error> {
     let mut settings = new_termios();
     if unsafe { tcgetattr(fd, &mut settings) } == 0 {
         Ok(settings)
@@ -104,7 +112,7 @@ fn get_tty_settings(fd: RawFd) -> Result<libc::termios> {
     }
 }
 
-fn set_tty_settings(fd: RawFd, settings: &libc::termios) -> Result<()> {
+fn set_tty_settings(fd: RawFd, settings: &libc::termios) -> Result<(), io::Error> {
     if unsafe { tcflush(fd, TCIFLUSH) } != 0 {
         return create_error("Could not flush tty device");
     }
