@@ -1,10 +1,7 @@
-use std::fs::File;
-use std::io;
-use std::io::{BufWriter, Write};
-use std::process::Command;
-
-extern crate chrono;
 use chrono::Local;
+use std::fs::File;
+use std::io::{BufWriter, Result, Write};
+use std::process::Command;
 
 pub struct Logfile {
     handle: Option<BufWriter<File>>,
@@ -12,7 +9,7 @@ pub struct Logfile {
 }
 
 impl Logfile {
-    pub fn new() -> Result<Logfile, io::Error> {
+    pub fn new() -> Result<Logfile> {
         let p = Local::now()
             .format("/home/fionn/Documents/lima-logs/log-%Y-%m-%d_%H:%M:%S")
             .to_string();
@@ -22,8 +19,11 @@ impl Logfile {
         })
     }
 
-    pub fn log(&mut self, buf: &[u8]) -> Result<(), io::Error> {
-        self.handle.as_mut().map(|h| h.write_all(buf)).unwrap()
+    pub fn log(&mut self, buf: &[u8]) -> Result<()> {
+        if let Some(h) = &mut self.handle {
+            h.write_all(buf)?;
+        }
+        Ok(())
     }
 }
 
