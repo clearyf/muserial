@@ -2,9 +2,14 @@
 
 This is a very basic serial port communication program.  Currently supported:
 
-- Fixed 115200 baud
-- Optional local echo (`--local-echo`)
-- Optional CR/NL translation (`--crnl-translation`)
+- 115200 baud, no parity.
+- Logfile support.  Everything received from the Uart is logged
+  directly into a file.  The location of the files only configurable
+  by adjusting the source code.  If muserial cleanly exits then the
+  logfile will be compressed with xz to save space.
+
+There used to be other features to add/remove newlines, linefeed, etc,
+but I removed them as I was not using them any more.
 
 # Usage
 

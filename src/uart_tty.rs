@@ -1,14 +1,62 @@
-use crate::utility::*;
+use crate::utility::create_error;
 use libc::*;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Result, Write};
+use std::io::{Read, Result, Stdin, Write, stdin};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::rc::Rc;
 
+struct TermiosSetting<T: AsRawFd> {
+    file: T,
+    original_settings: libc::termios,
+}
+
+impl<T: AsRawFd> TermiosSetting<T> {
+    fn from_stdin(file: Stdin) -> Result<TermiosSetting<Stdin>> {
+        let settings = get_term_settings(file.as_raw_fd())?;
+        set_term_settings(file.as_raw_fd(), &update_tty_settings(&settings))?;
+        Ok(TermiosSetting {
+            file: file,
+            original_settings: settings,
+        })
+    }
+    fn from_uart(file: File) -> Result<TermiosSetting<File>> {
+        let settings = get_term_settings(file.as_raw_fd())?;
+        set_term_settings(file.as_raw_fd(), &update_uart_settings(&settings))?;
+        Ok(TermiosSetting {
+            file: file,
+            original_settings: settings,
+        })
+    }
+}
+
+impl<T: AsRawFd> Drop for TermiosSetting<T> {
+    fn drop(&mut self) {
+        if let Err(e) = set_term_settings(self.file.as_raw_fd(), &self.original_settings) {
+            println!("Couldn't restore tty settings: {}", e);
+        }
+    }
+}
+
 struct UartSettings {
-    previous_uart_settings: libc::termios,
-    previous_tty_settings: libc::termios,
+    _previous_uart_settings: TermiosSetting<File>,
+    _previous_tty_settings: TermiosSetting<Stdin>,
     file: File,
+}
+
+impl UartSettings {
+    fn new(file: File) -> Result<UartSettings> {
+        Ok(UartSettings {
+            _previous_uart_settings: TermiosSetting::<File>::from_uart(file.try_clone()?)?,
+            _previous_tty_settings: TermiosSetting::<Stdin>::from_stdin(stdin())?,
+            file: file,
+        })
+    }
+}
+
+impl AsRawFd for UartSettings {
+    fn as_raw_fd(&self) -> i32 {
+        self.file.as_raw_fd()
+    }
 }
 
 pub struct UartRead {
@@ -62,40 +110,7 @@ impl Write for UartWrite {
     }
 }
 
-impl UartSettings {
-    fn new(file: File) -> Result<UartSettings> {
-        let tty_settings = get_tty_settings(STDIN_FILENO)?;
-        set_tty_settings(STDIN_FILENO, &update_tty_settings(&tty_settings))?;
-
-        let uart_settings = get_tty_settings(file.as_raw_fd())?;
-        set_tty_settings(file.as_raw_fd(), &update_uart_settings(&uart_settings))?;
-
-        Ok(UartSettings {
-            previous_uart_settings: uart_settings,
-            previous_tty_settings: tty_settings,
-            file: file,
-        })
-    }
-}
-
-impl Drop for UartSettings {
-    fn drop(&mut self) {
-        if let Err(e) = set_tty_settings(STDIN_FILENO, &self.previous_tty_settings) {
-            println!("Couldn't restore tty settings: {}", e);
-        }
-        if let Err(e) = set_tty_settings(self.as_raw_fd(), &self.previous_uart_settings) {
-            println!("Couldn't restore uart settings: {}", e);
-        }
-    }
-}
-
-impl AsRawFd for UartSettings {
-    fn as_raw_fd(&self) -> i32 {
-        self.file.as_raw_fd()
-    }
-}
-
-fn get_tty_settings(fd: RawFd) -> Result<libc::termios> {
+fn get_term_settings(fd: RawFd) -> Result<libc::termios> {
     let mut settings = new_termios();
     if unsafe { tcgetattr(fd, &mut settings) } == 0 {
         Ok(settings)
@@ -104,7 +119,7 @@ fn get_tty_settings(fd: RawFd) -> Result<libc::termios> {
     }
 }
 
-fn set_tty_settings(fd: RawFd, settings: &libc::termios) -> Result<()> {
+fn set_term_settings(fd: RawFd, settings: &libc::termios) -> Result<()> {
     if unsafe { tcflush(fd, TCIFLUSH) } != 0 {
         return create_error("Could not flush tty device");
     }
