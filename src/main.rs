@@ -33,7 +33,16 @@ where
 }
 
 async fn uart_read_loop(stop: SendStop, uart: UartRead) -> Result<Reason> {
-    let mut logfile = Logfile::new()?;
+    let mut logfile = match Logfile::new() {
+        Ok(file) => {
+            eprintln!("\r\nLogfile: {}", file.path());
+            Some(file)
+        },
+        Err(e) => {
+            eprintln!("\r\nCouldn't open logfile, {:?}; proceeding without...", e);
+            None
+        }
+    };
     let mut buf = vec![0; BUFFER_SIZE];
     let mut uart = Async::new(uart)?;
     let mut stdout = Async::new(stdout())?;
@@ -49,7 +58,9 @@ async fn uart_read_loop(stop: SendStop, uart: UartRead) -> Result<Reason> {
         // No point doing anything non-blocking here, we're writing a
         // few kb to a file on a local filesystem; the OS will buffer
         // for us.
-        logfile.log(&bytes_read)?;
+        if let Some(logfile) = logfile.as_mut() {
+            logfile.log(&bytes_read)?;
+        }
     }
     Ok(Reason::GotStop)
 }

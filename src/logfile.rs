@@ -1,3 +1,4 @@
+use crate::utility::create_error;
 use chrono::Local;
 use std::fs::File;
 use std::io::{BufWriter, Result, Write};
@@ -10,13 +11,20 @@ pub struct Logfile {
 
 impl Logfile {
     pub fn new() -> Result<Logfile> {
-        let p = Local::now()
-            .format("/home/fionn/Documents/lima-logs/log-%Y-%m-%d_%H:%M:%S")
-            .to_string();
+        let home_dir = match std::env::var("HOME") {
+            Ok(dir) => dir,
+            Err(_) => return create_error("$HOME not defined?!"),
+        };
+        let time = Local::now().format("%Y-%m-%d_%H:%M:%S").to_string();
+        let path = format!("{}/Documents/lima-logs/log-{}", home_dir, time);
         Ok(Logfile {
-            handle: Some(BufWriter::new(File::create(&p)?)),
-            path: p,
+            handle: Some(BufWriter::new(File::create(&path)?)),
+            path: path,
         })
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     pub fn log(&mut self, buf: &[u8]) -> Result<()> {
