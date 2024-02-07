@@ -1,89 +1,94 @@
-mod logfile;
-mod sendstop;
 mod uart_tty;
 mod utility;
-use crate::logfile::*;
-use crate::sendstop::*;
+
 use crate::uart_tty::*;
+use crate::utility::create_error;
+
 use argparse::{ArgumentParser, Store};
-use futures_concurrency::future::{FutureExt, Join};
-use futures_lite::{AsyncReadExt, AsyncWriteExt};
-use smol::Async;
-use std::io::{stdin, stdout, Result};
+use chrono::Local;
+use futures_lite::{AsyncReadExt, future};
+use smol::{Async, block_on};
+use std::fs::File;
+use std::io::{BufWriter, Write, self, stdin, stdout};
+use std::process::Command;
 
 const BUFFER_SIZE: usize = 128;
 
 #[derive(Debug)]
-enum Reason {
-    EOF,
+enum ExitReason {
+    Eof,
     UserRequest,
-    GotStop,
 }
 
-async fn do_read<T>(stop: &SendStop, src: &mut T, mut buf: &mut [u8]) -> Option<Result<usize>>
-where
-    T: AsyncReadExt + Unpin,
-{
-    let stop_fut = async {
-        stop.should_stop().await;
-        None
+enum WhichRead {
+    Uart(Result<usize, io::Error>),
+    Stdin(Result<usize, io::Error>),
+}
+
+fn mainloop(dev_name: &str, logfile_path: &str) -> Result<ExitReason, io::Error> {
+    let (uart_read, mut uart_write) = match open_uart(dev_name) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("Could not open uart: {}", e);
+            return Err(e);
+        }
     };
-    let read_fut = async { Some(src.read(&mut buf).await) };
-    stop_fut.race(read_fut).await
-}
-
-async fn uart_read_loop(stop: SendStop, uart: UartRead) -> Result<Reason> {
-    let mut logfile = match Logfile::new() {
+    let mut logfile = match File::create(logfile_path) {
         Ok(file) => {
-            eprintln!("\r\nLogfile: {}", file.path());
-            Some(file)
-        },
+            eprintln!("\r\nLogfile: {}", logfile_path);
+            Some(BufWriter::new(file))
+        }
         Err(e) => {
             eprintln!("\r\nCouldn't open logfile, {:?}; proceeding without...", e);
             None
         }
     };
-    let mut buf = vec![0; BUFFER_SIZE];
-    let mut uart = Async::new(uart)?;
-    let mut stdout = Async::new(stdout())?;
 
-    while let Some(result) = do_read(&stop, &mut uart, &mut buf).await {
-        let read_size = result?;
-        if read_size == 0 {
-            return Ok(Reason::EOF);
-        }
-        let bytes_read = &buf[..read_size];
-        stdout.write_all(&bytes_read).await?;
-        stdout.flush().await?;
-        // No point doing anything non-blocking here, we're writing a
-        // few kb to a file on a local filesystem; the OS will buffer
-        // for us.
-        if let Some(logfile) = logfile.as_mut() {
-            logfile.log(&bytes_read)?;
+    let mut stdout = stdout();
+    let mut stdin = Async::new(stdin())?;
+    let mut stdin_buf = vec![0; BUFFER_SIZE];
+    let mut uart_read = Async::new(uart_read)?;
+    let mut uart_read_buf = vec![0; BUFFER_SIZE];
+    loop {
+        let stdin_fut = async { WhichRead::Stdin(stdin.read(&mut stdin_buf).await) };
+        let uart_fut = async { WhichRead::Uart(uart_read.read(&mut uart_read_buf).await) };
+        match block_on(future::or(stdin_fut, uart_fut)) {
+            WhichRead::Stdin(result) => {
+                let read_size = result?;
+                if read_size == 0 {
+                    return Ok(ExitReason::Eof);
+                }
+                let bytes_read = &stdin_buf[..read_size];
+                let control_o: u8 = 0x0f;
+                if bytes_read.contains(&control_o) {
+                    return Ok(ExitReason::UserRequest);
+                }
+                uart_write.write_all(bytes_read)?;
+                uart_write.flush()?;
+            }
+            WhichRead::Uart(result) => {
+                let read_size = result?;
+                if read_size == 0 {
+                    return Ok(ExitReason::Eof);
+                }
+                let bytes_read = &uart_read_buf[..read_size];
+                stdout.write_all(bytes_read)?;
+                stdout.flush()?;
+                if let Some(logfile) = logfile.as_mut() {
+                    logfile.write_all(bytes_read)?;
+                }
+            }
         }
     }
-    Ok(Reason::GotStop)
 }
 
-async fn uart_write_loop(stop: SendStop, uart: UartWrite) -> Result<Reason> {
-    let mut buf = vec![0; BUFFER_SIZE];
-    let mut stdin = Async::new(stdin())?;
-    let mut uart = Async::new(uart)?;
-
-    while let Some(result) = do_read(&stop, &mut stdin, &mut buf).await {
-        let read_size = result?;
-        if read_size == 0 {
-            return Ok(Reason::EOF);
-        }
-        let control_o: u8 = 0x0f;
-        let bytes_read = &buf[..read_size];
-        if bytes_read.contains(&control_o) {
-            return Ok(Reason::UserRequest);
-        }
-        uart.write_all(&bytes_read).await?;
-        uart.flush().await?;
-    }
-    Ok(Reason::GotStop)
+fn get_logfile_path() -> Result<String, io::Error> {
+    let home_dir = match std::env::var("HOME") {
+        Ok(dir) => dir,
+        Err(_) => return create_error("$HOME not defined?!"),
+    };
+    let time = Local::now().format("%Y-%m-%d_%H:%M:%S").to_string();
+    Ok(format!("{}/Documents/lima-logs/log-{}", home_dir, time))
 }
 
 fn main() {
@@ -97,30 +102,33 @@ fn main() {
     }
     println!("Opening uart: {}", dev_name);
 
-    let (uart_read, uart_write) = match create_uart(&dev_name) {
+    let logfile_path = match get_logfile_path() {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("Could not open uart: {}", e);
+            eprintln!(
+                "\r\nError: Could not get path for logfile: {:?}, exiting...",
+                e
+            );
             return;
         }
     };
 
-    // By using a local executor everything runs in this thread,
-    // except for the IO reactor that is; that cannot be avoided with
-    // smol's architecture.  But at least it means that we do not need
-    // Arc or Send for this program's types, Rc is enough.
-    let executor = smol::LocalExecutor::new();
-    let stop = SendStop::new();
-    let uart_write_loop_task = {
-        let stop = stop.clone();
-        executor.spawn(uart_write_loop(stop, uart_write))
-    };
-    let uart_read_loop_task = executor.spawn(uart_read_loop(stop, uart_read));
-    let combined_fut = (uart_write_loop_task, uart_read_loop_task).join();
-    let result = smol::block_on(executor.run(combined_fut));
-    match result {
-        (Ok(Reason::UserRequest), _) => println!("\r\nQuit on user request"),
-        (_, Ok(Reason::EOF)) => println!("\r\nGot EOF from {}", dev_name),
+    match mainloop(&dev_name, &logfile_path) {
+        Ok(ExitReason::UserRequest) => println!("\r\nQuit on user request"),
+        Ok(ExitReason::Eof) => println!("\r\nGot Eof from {}", dev_name),
         e => eprintln!("\r\nError: {:?}", e),
-    };
+    }
+
+    if std::fs::metadata(&logfile_path).map_or(false, |m| m.is_file()) {
+        match Command::new("xz").arg(&logfile_path).status() {
+            Ok(status) => {
+                if !status.success() {
+                    eprintln!("Got {} on running xz on {}", status, logfile_path);
+                }
+            }
+            Err(e) => {
+                eprintln!("Got an error {} trying to run xz on {}", e, logfile_path);
+            }
+        }
+    }
 }
