@@ -1,11 +1,10 @@
-use crate::utility::create_error;
-
+use async_io::IoSafe;
 use libc::*;
+use snafu::{prelude::*, Whatever};
 use std::fs::{File, OpenOptions};
-use std::io::{stdin, Read, Result, Stdin, Write};
+use std::io::{self, stdin, Read, Stdin, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::rc::Rc;
-use async_io::IoSafe;
 
 struct TermiosSetting<T: AsFd> {
     file: T,
@@ -13,7 +12,8 @@ struct TermiosSetting<T: AsFd> {
 }
 
 impl<T: AsFd> TermiosSetting<T> {
-    fn from_stdin(file: Stdin) -> Result<TermiosSetting<Stdin>> {
+    fn from_stdin() -> Result<TermiosSetting<Stdin>, Whatever> {
+        let file = stdin();
         let original_settings = get_term_settings(file.as_fd())?;
         set_term_settings(file.as_fd(), &update_tty_settings(&original_settings))?;
         Ok(TermiosSetting {
@@ -21,7 +21,7 @@ impl<T: AsFd> TermiosSetting<T> {
             original_settings,
         })
     }
-    fn from_uart(file: File) -> Result<TermiosSetting<File>> {
+    fn from_uart(file: File) -> Result<TermiosSetting<File>, Whatever> {
         let original_settings = get_term_settings(file.as_fd())?;
         set_term_settings(file.as_fd(), &update_uart_settings(&original_settings))?;
         Ok(TermiosSetting {
@@ -46,10 +46,13 @@ struct UartSettings {
 }
 
 impl UartSettings {
-    fn new(file: File) -> Result<UartSettings> {
+    fn new(file: File) -> Result<UartSettings, Whatever> {
         Ok(UartSettings {
-            _previous_uart_settings: TermiosSetting::<File>::from_uart(file.try_clone()?)?,
-            _previous_tty_settings: TermiosSetting::<Stdin>::from_stdin(stdin())?,
+            _previous_uart_settings: TermiosSetting::<File>::from_uart(
+                file.try_clone()
+                    .whatever_context("Could not clone UART handle")?,
+            )?,
+            _previous_tty_settings: TermiosSetting::<Stdin>::from_stdin()?,
             file,
         })
     }
@@ -71,11 +74,21 @@ pub struct UartWrite {
     _settings: Rc<UartSettings>,
 }
 
-pub fn open_uart(dev_name: &str) -> Result<(UartRead, UartWrite)> {
-    let inner = OpenOptions::new().read(true).write(true).open(dev_name)?;
-    let settings = Rc::new(UartSettings::new(inner.try_clone()?)?);
+pub fn open_uart(dev_name: &str) -> Result<(UartRead, UartWrite), Whatever> {
+    let inner = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dev_name)
+        .with_whatever_context(|_| format!("Could not open UART device: {}", dev_name))?;
+    let settings = Rc::new(UartSettings::new(
+        inner
+            .try_clone()
+            .whatever_context("Could not clone UART handle")?,
+    )?);
     let uart_read = UartRead {
-        inner: inner.try_clone()?,
+        inner: inner
+            .try_clone()
+            .whatever_context("Could not clone UART handle")?,
         _settings: settings.clone(),
     };
     let uart_write = UartWrite {
@@ -92,39 +105,41 @@ impl AsFd for UartRead {
 }
 
 impl Read for UartRead {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
         self.inner.read(buf)
     }
 }
 
+// This is the marker type to explicitly state that the UartRead I/O
+// trait implementation will not drop the underlying I/O source.
 unsafe impl IoSafe for UartRead {}
 
 impl Write for UartWrite {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
         self.inner.write(buf)
     }
-    fn flush(&mut self) -> Result<()> {
+    fn flush(&mut self) -> Result<(), io::Error> {
         self.inner.flush()
     }
 }
 
-fn get_term_settings(fd: BorrowedFd) -> Result<libc::termios> {
+fn get_term_settings(fd: BorrowedFd) -> Result<libc::termios, Whatever> {
     let mut settings = new_termios();
     if unsafe { tcgetattr(fd.as_raw_fd(), &mut settings) } == 0 {
         Ok(settings)
     } else {
-        create_error("Could not get tty settings")
+        whatever!("Could not get tty settings")
     }
 }
 
-fn set_term_settings(fd: BorrowedFd, settings: &libc::termios) -> Result<()> {
+fn set_term_settings(fd: BorrowedFd, settings: &libc::termios) -> Result<(), Whatever> {
     if unsafe { tcflush(fd.as_raw_fd(), TCIFLUSH) } != 0 {
-        return create_error("Could not flush tty device");
+        whatever!("Could not flush tty device");
     }
     if unsafe { tcsetattr(fd.as_raw_fd(), TCSANOW, settings) } == 0 {
         Ok(())
     } else {
-        create_error("Could not set tty settings")
+        whatever!("Could not set tty settings")
     }
 }
 
